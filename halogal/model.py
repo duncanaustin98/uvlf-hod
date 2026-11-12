@@ -9,6 +9,7 @@ import numpy as np
 from scipy import interpolate, integrate
 from scipy.special import erf
 from scipy.stats import norm
+from abc import ABC, abstractmethod
 
 from .config import BARYON_FRACTION
 from .luminosity import MUV_from_SFR
@@ -22,7 +23,137 @@ except ImportError:
     HALOMOD_AVAILABLE = False
 
 
-class UVHMRModel:
+class HMRModel(ABC):
+    """Base class for Halo Mass Relation models.
+        
+    This class handles the relationship between halo mass and UV luminosity
+    through star formation. It serves as the foundation for more complex
+    models that include occupation distributions.
+    
+    Parameters
+    ----------
+    z : float
+        Redshift
+    eps0 : float, optional
+        Star formation efficiency normalization. Default from config.
+    Mc : float, optional
+        Characteristic halo mass in M_sun. Default from config.
+    a : float, optional
+        Low-mass power-law slope. Default from config.
+    b : float, optional
+        High-mass power-law slope. Default from config.
+        
+    Attributes
+    ----------
+    z, eps0, Mc, a, b : float
+        Model parameters
+        
+    Examples
+    --------
+    >>> # Use all defaults
+    >>> model = HMRModel(z=6.0)
+    >>> 
+    >>> # Override specific parameters
+    >>> model = HMRModel(z=6.0, eps0=0.2, Mc=10**12)
+    """
+
+    #: Names accepted by ``update_parameters`` (extended by subclasses).
+    _PARAM_NAMES = ('z', 'eps0', 'Mc', 'a', 'b')
+
+    @classmethod
+    def param_names(cls):
+        """Names of all parameters accepted by :meth:`update_parameters`."""
+        return cls._PARAM_NAMES
+
+    def __init__(self, z, eps0=None, Mc=None, a=None, b=None):
+        """Initialize UV/Mstar HMR model."""
+        from .config import DEFAULT_HOD_PARAMS
+        
+        self.z = z
+        self.eps0 = eps0 if eps0 is not None else DEFAULT_HOD_PARAMS['eps0']
+        self.Mc = Mc if Mc is not None else 10**DEFAULT_HOD_PARAMS['logMc']
+        self.a = a if a is not None else DEFAULT_HOD_PARAMS['a']
+        self.b = b if b is not None else DEFAULT_HOD_PARAMS['b']
+
+    @abstractmethod
+    def __call__(self, Mh):
+        pass
+ 
+    def __repr__(self):
+        return (f"{type(self).__name__}(z={self.z}, eps0={self.eps0:.3f}, "
+                f"Mc={self.Mc:.2e}, a={self.a:.2f}, b={self.b:.2f})")
+
+    def _settings(self):
+        """Non-parameter options to report in ``__str__``."""
+        return {}
+
+    @abstractmethod
+    def property(self, Mh):
+        pass
+
+    def star_formation_efficiency(self, Mh):
+        """Compute star formation efficiency.
+        
+        Parameters
+        ----------
+        Mh : float or array_like
+            Halo mass in M_sun
+            
+        Returns
+        -------
+        epsilon : float or ndarray
+            Star formation efficiency
+        """
+        Mh = np.atleast_1d(Mh)
+        return 2 * self.eps0 / ((Mh / self.Mc)**(-self.a) + (Mh / self.Mc)**self.b)
+
+    def Mhalo(self, property, M_min=1e6, M_max=1e16, num_points=1000):
+        """Inverse: halo mass from relevant property (i.e. MUV or Mstar).
+        
+        Parameters
+        ----------
+        property : float or array_like
+            UV absolute magnitude or stellar mass
+        M_min, M_max : float, optional
+            Halo mass range for interpolation
+        num_points : int, optional
+            Number of points for interpolation
+            
+        Returns
+        -------
+        Mh : float or ndarray
+            Halo mass in M_sun
+        """
+        # Create forward relation
+        Mhalo_grid = np.logspace(np.log10(M_min), np.log10(M_max), num_points)
+        property_grid = self.property(Mhalo_grid)
+        
+        # Invert using interpolation
+        interp_func = interpolate.interp1d(property_grid, Mhalo_grid, 
+                                           fill_value='extrapolate')
+        return interp_func(property)
+    
+    def update_parameters(self, **kwargs):
+        """Update model parameters.
+        
+        Parameters
+        ----------
+        **kwargs : dict
+            Parameters to update: z, eps0, Mc, a, b, add_dust
+        """
+        if 'z' in kwargs:
+            self.z = kwargs['z']
+        if 'eps0' in kwargs:
+            self.eps0 = kwargs['eps0']
+        if 'Mc' in kwargs:
+            self.Mc = kwargs['Mc']
+        if 'a' in kwargs:
+            self.a = kwargs['a']
+        if 'b' in kwargs:
+            self.b = kwargs['b']
+
+
+class UVHMRModel(HMRModel):
     """Base class for UV-Halo Mass Relation models.
     
     This class handles the relationship between halo mass and UV luminosity
@@ -60,32 +191,12 @@ class UVHMRModel:
     >>> model = UVHMRModel(z=6.0, eps0=0.2, Mc=10**12)
     """
     
+    _PARAM_NAMES = HMRModel._PARAM_NAMES + ('add_dust',)
+
     def __init__(self, z, eps0=None, Mc=None, a=None, b=None, add_dust=True):
         """Initialize UVHMR model."""
-        from .config import DEFAULT_HOD_PARAMS
-        
-        self.z = z
-        self.eps0 = eps0 if eps0 is not None else DEFAULT_HOD_PARAMS['eps0']
-        self.Mc = Mc if Mc is not None else 10**DEFAULT_HOD_PARAMS['logMc']
-        self.a = a if a is not None else DEFAULT_HOD_PARAMS['a']
-        self.b = b if b is not None else DEFAULT_HOD_PARAMS['b']
         self.add_dust = add_dust
-    
-    def star_formation_efficiency(self, Mh):
-        """Compute star formation efficiency.
-        
-        Parameters
-        ----------
-        Mh : float or array_like
-            Halo mass in M_sun
-            
-        Returns
-        -------
-        epsilon : float or ndarray
-            Star formation efficiency
-        """
-        Mh = np.atleast_1d(Mh)
-        return 2 * self.eps0 / ((Mh / self.Mc)**(-self.a) + (Mh / self.Mc)**self.b)
+        super().__init__(z, eps0=eps0, Mc=Mc, a=a, b=b)
     
     def halo_accretion_rate(self, Mh):
         """Compute halo mass accretion rate.
@@ -103,8 +214,8 @@ class UVHMRModel:
         Mh = np.atleast_1d(Mh)
         return 0.03e-9 * Mh * (Mh / 1e12)**0.14 * (1 + self.z)**2.5
     
-    def sfr(self, Mh):
-        """Star formation rate from halo mass.
+    def __call__(self, Mh):
+        """Abstract method override equivalent to the SFR
         
         Parameters
         ----------
@@ -118,9 +229,23 @@ class UVHMRModel:
         """
         f_star = self.star_formation_efficiency(Mh)
         return BARYON_FRACTION * f_star * self.halo_accretion_rate(Mh)
-    
-    def MUV(self, Mh):
-        """UV absolute magnitude from halo mass.
+
+    def sfr(self, Mh):
+        """Star formation rate from halo mass.
+        Parameters
+        ----------
+        Mh : float or array_like
+            Halo mass in M_sun
+            
+        Returns
+        -------
+        sfr : float or ndarray
+            Star formation rate in M_sun/yr
+        """
+        return self(Mh)
+
+    def property(self, Mh):
+        """Abstract method override equivalent to MUV
         
         Parameters
         ----------
@@ -134,33 +259,25 @@ class UVHMRModel:
         """
         sfr = self.sfr(Mh)
         return MUV_from_SFR(sfr, self.z, add_dust=self.add_dust)
-    
-    def Mhalo(self, MUV, M_min=1e6, M_max=1e16, num_points=1000):
-        """Inverse: halo mass from UV magnitude.
+
+    def MUV(self, Mh):
+        """UV absolute magnitude from halo mass.
         
         Parameters
         ----------
-        MUV : float or array_like
-            UV absolute magnitude
-        M_min, M_max : float, optional
-            Halo mass range for interpolation
-        num_points : int, optional
-            Number of points for interpolation
+        Mh : float or array_like
+            Halo mass in M_sun
             
         Returns
         -------
-        Mh : float or ndarray
-            Halo mass in M_sun
+        MUV : float or ndarray
+            UV absolute magnitude
         """
-        # Create forward relation
-        Mhalo_grid = np.logspace(np.log10(M_min), np.log10(M_max), num_points)
-        MUV_grid = self.MUV(Mhalo_grid)
-        
-        # Invert using interpolation
-        interp_func = interpolate.interp1d(MUV_grid, Mhalo_grid, 
-                                           fill_value='extrapolate')
-        return interp_func(MUV)
-    
+        return self.property(Mh)
+
+    def _settings(self):
+        return {'add_dust': self.add_dust}
+
     def update_parameters(self, **kwargs):
         """Update model parameters.
         
@@ -169,29 +286,18 @@ class UVHMRModel:
         **kwargs : dict
             Parameters to update: z, eps0, Mc, a, b, add_dust
         """
-        if 'z' in kwargs:
-            self.z = kwargs['z']
-        if 'eps0' in kwargs:
-            self.eps0 = kwargs['eps0']
-        if 'Mc' in kwargs:
-            self.Mc = kwargs['Mc']
-        if 'a' in kwargs:
-            self.a = kwargs['a']
-        if 'b' in kwargs:
-            self.b = kwargs['b']
         if 'add_dust' in kwargs:
             self.add_dust = kwargs['add_dust']
-    
-    def __repr__(self):
-        return (f"UVHMRModel(z={self.z}, eps0={self.eps0:.3f}, "
-                f"Mc={self.Mc:.2e}, a={self.a:.2f}, b={self.b:.2f})")
+            #kwargs.pop('add_dust')
+        super().update_parameters(**kwargs)
 
 
-class HODModel(UVHMRModel):
-    """Halo Occupation Distribution model.
+class SHMRModel(HMRModel):
+    """Base class for Stellar-Halo Mass Relation models.
     
-    This class extends UVHMRModel to include central and satellite
-    galaxy occupation functions.
+    This class handles the relationship between stellar and halo mass
+    through star formation. It serves as the foundation for more complex
+    models that include occupation distributions.
     
     Parameters
     ----------
@@ -205,82 +311,188 @@ class HODModel(UVHMRModel):
         Low-mass power-law slope. Default from config.
     b : float, optional
         High-mass power-law slope. Default from config.
-    sigma_UV : float, optional
-        UV magnitude scatter. Default from config.
+        
+    Attributes
+    ----------
+    z, eps0, Mc, a, b : float
+        Model parameters
+        
+    Examples
+    --------
+    >>> # Use all defaults
+    >>> model = SHMRModel(z=6.0)
+    >>> 
+    >>> # Override specific parameters
+    >>> model = SHMRModel(z=6.0, eps0=0.2, Mc=10**12)
+    """
+    
+    def __call__(self, Mh):
+        """Abstract method override equivalent to the stellar mass
+        
+        Parameters
+        ----------
+        Mh : float or array_like
+            Halo mass in M_sun
+            
+        Returns
+        -------
+        Mstar : float or ndarray
+            Stellar mass in M_sun
+        """
+        f_star = self.star_formation_efficiency(Mh)
+        return BARYON_FRACTION * f_star * Mh
+
+    def Mstar(self, Mh):
+        """Stellar mass from halo mass.
+        Parameters
+        ----------
+        Mh : float or array_like
+            Halo mass in M_sun
+            
+        Returns
+        -------
+        Mstar : float or ndarray
+            Stellar mass in M_sun
+        """
+        return self(Mh)
+
+    def property(self, Mh):
+        """Abstract method override equivalent to Mstar
+        
+        Parameters
+        ----------
+        Mh : float or array_like
+            Halo mass in M_sun
+            
+        Returns
+        -------
+        Mstar : float or ndarray
+            Stellar mass
+        """
+        return self(Mh)
+
+
+class BaseHODModel(HMRModel):
+    """Shared Halo Occupation Distribution machinery.
+
+    Adds central and satellite occupation functions on top of an
+    :class:`HMRModel`. Concrete models combine this with a specific HMR
+    (e.g. ``class UVHODModel(BaseHODModel, UVHMRModel)``) and supply:
+
+    * :meth:`_selection_variable` -- mean M_UV, log10 Mstar, ... at fixed Mh
+    * ``_selection_sign`` -- +1 to select above the threshold, -1 below
+    * ``_sigma_name`` -- name of the scatter parameter (e.g. ``'sigma_UV'``),
+      which is also its ``DEFAULT_HOD_PARAMS`` key
+    * ``_sigma_unit`` -- unit label of the scatter used in ``__str__``
+
+    The central and satellite occupations, parameter updates and printing
+    are all shared.
+
+    Parameters
+    ----------
+    z : float
+        Redshift
+    eps0, Mc, a, b : float, optional
+        HMR parameters. Default from config.
+    sigma : float, optional
+        Scatter of the central occupation, stored as the attribute named by
+        ``_sigma_name``. Subclasses expose it under that name. Default from
+        config.
     Mcut : float, optional
         Satellite cutoff mass in M_sun. Default from config.
     Msat : float, optional
         Satellite normalization mass in M_sun. Default from config.
     asat : float, optional
         Satellite power-law slope. Default from config.
-    add_dust : bool, optional
-        Whether to include dust attenuation. Default is True.
-        
+    **kwargs
+        Extra HMR arguments (e.g. ``add_dust`` for :class:`UVHMRModel`).
+
     Attributes
     ----------
-    sigma_UV, Mcut, Msat, asat : float
-        HOD parameters
-        
-    Examples
-    --------
-    >>> # Use all defaults
-    >>> model = HODModel(z=6.0)
-    >>> 
-    >>> # Compute occupation numbers
-    >>> import numpy as np
-    >>> Mh = np.logspace(10, 13, 100)
-    >>> N_cen = model.Ncen(Mh, MUV_thresh=-19.0)
-    >>> N_sat = model.Nsat(Mh, MUV_thresh=-19.0)
+    Mcut, Msat, asat : float
+        Satellite HOD parameters
     """
-    
-    def __init__(self, z, eps0=None, Mc=None, a=None, b=None, 
-                 sigma_UV=None, Mcut=None, Msat=None, asat=None, 
-                 add_dust=True):
-        """Initialize HOD model."""
+
+    _sigma_name = None
+    _sigma_unit = ''
+    _SAT_PARAMS = ('Mcut', 'Msat', 'asat')
+
+    #: +1 if the sample is selected *above* ``thresh`` (e.g. stellar mass),
+    #: -1 if *below* it (e.g. magnitudes, where brighter is more negative).
+    _selection_sign = None
+
+    def __init__(self, z, eps0=None, Mc=None, a=None, b=None,
+                 sigma=None, Mcut=None, Msat=None, asat=None, **kwargs):
         from .config import DEFAULT_HOD_PARAMS
-        
-        # Initialize parent class
-        super().__init__(z, eps0, Mc, a, b, add_dust)
-        
-        # Set HOD parameters
-        self.sigma_UV = sigma_UV if sigma_UV is not None else DEFAULT_HOD_PARAMS['sigma_UV']
+
+        super().__init__(z, eps0=eps0, Mc=Mc, a=a, b=b, **kwargs)
+
+        setattr(self, self._sigma_name,
+                sigma if sigma is not None
+                else DEFAULT_HOD_PARAMS[self._sigma_name])
         self.Mcut = Mcut if Mcut is not None else 10**DEFAULT_HOD_PARAMS['Mcut']
         self.Msat = Msat if Msat is not None else 10**DEFAULT_HOD_PARAMS['Msat']
         self.asat = asat if asat is not None else DEFAULT_HOD_PARAMS['asat']
-    
-    def Ncen(self, Mh, MUV_thresh):
+
+    @classmethod
+    def param_names(cls):
+        """Names of all parameters accepted by :meth:`update_parameters`."""
+        return super().param_names() + (cls._sigma_name, *cls._SAT_PARAMS)
+
+    @property
+    def _sigma(self):
+        """Value of the scatter parameter, whatever the subclass calls it."""
+        return getattr(self, self._sigma_name)
+
+    @abstractmethod
+    def _selection_variable(self, Mh):
+        """Mean selection variable at fixed halo mass.
+
+        The quantity whose scatter at fixed Mh is Gaussian with width
+        given by the scatter parameter, and which ``thresh`` is compared
+        against (e.g. M_UV or log10 Mstar).
+        """
+
+    def Ncen(self, Mh, thresh):
         """Central galaxy occupation function.
-        
-        Average number of central galaxies with M_UV < MUV_thresh.
-        
+
+        Fraction of haloes of mass Mh whose central passes ``thresh``,
+        assuming Gaussian scatter in the selection variable::
+
+            N_cen = 0.5 * [1 + erf(s * (x(Mh) - thresh) / (sqrt(2) sigma))]
+
+        with ``x`` = :meth:`_selection_variable`, ``s`` =
+        ``_selection_sign`` and ``sigma`` the model's scatter parameter.
+
         Parameters
         ----------
         Mh : float or array_like
             Halo mass in M_sun
-        MUV_thresh : float
-            UV magnitude threshold (brighter than)
-            
+        thresh : float
+            Sample threshold in the units of the selection variable
+
         Returns
         -------
         N_cen : float or ndarray
             Average number of central galaxies
         """
-        MUV_mean = self.MUV(Mh)
-        return 0.5 * (1 - erf((MUV_mean - MUV_thresh) / 
-                              (np.sqrt(2) * self.sigma_UV)))
-    
-    def Nsat(self, Mh, MUV_thresh):
+        x_mean = self._selection_variable(Mh)
+        return 0.5 * (1 + erf(self._selection_sign * (x_mean - thresh) /
+                              (np.sqrt(2) * self._sigma)))
+
+    def Nsat(self, Mh, thresh):
         """Satellite galaxy occupation function.
-        
-        Average number of satellite galaxies with M_UV < MUV_thresh.
-        
+
+        Average number of satellites passing ``thresh``, modulated by the
+        central occupation.
+
         Parameters
         ----------
         Mh : float or array_like
             Halo mass in M_sun
-        MUV_thresh : float
-            UV magnitude threshold
-            
+        thresh : float
+            Sample threshold, in the units expected by :meth:`Ncen`
+
         Returns
         -------
         N_sat : float or ndarray
@@ -289,150 +501,263 @@ class HODModel(UVHMRModel):
         # astype(float): an integer mass array would truncate N_sat to
         # whole numbers (and zeros_like would make it an integer array).
         Mh = np.atleast_1d(Mh).astype(float)
-        N_cen = self.Ncen(Mh, MUV_thresh)
-        
+        N_cen = self.Ncen(Mh, thresh)
+
         # Satellites only exist above cutoff mass
         N_sat = np.zeros_like(Mh)
         mask = Mh > self.Mcut
         N_sat[mask] = ((Mh[mask] - self.Mcut) / self.Msat)**self.asat
-        
+
         return N_sat * N_cen
-    
-    def Ngal(self, Mh, MUV_thresh):
+
+    def Ngal(self, Mh, thresh):
         """Total galaxy occupation (central + satellite).
-        
+
         Parameters
         ----------
         Mh : float or array_like
             Halo mass in M_sun
-        MUV_thresh : float
-            UV magnitude threshold
-            
+        thresh : float
+            Sample threshold, in the units expected by :meth:`Ncen`
+
         Returns
         -------
         N_gal : float or ndarray
             Average total number of galaxies
         """
-        return self.Ncen(Mh, MUV_thresh) + self.Nsat(Mh, MUV_thresh)
-    
+        return self.Ncen(Mh, thresh) + self.Nsat(Mh, thresh)
+
     def update_parameters(self, **kwargs):
         """Update model parameters.
-        
+
         Parameters
         ----------
         **kwargs : dict
-            Parameters to update: z, eps0, Mc, a, b, sigma_UV, 
-            Mcut, Msat, asat, add_dust
+            HMR parameters plus the scatter parameter, Mcut, Msat and asat.
         """
         super().update_parameters(**kwargs)
-        
-        if 'sigma_UV' in kwargs:
-            self.sigma_UV = kwargs['sigma_UV']
-        if 'Mcut' in kwargs:
-            self.Mcut = kwargs['Mcut']
-        if 'Msat' in kwargs:
-            self.Msat = kwargs['Msat']
-        if 'asat' in kwargs:
-            self.asat = kwargs['asat']
-    
+        for name in (self._sigma_name, *self._SAT_PARAMS):
+            if name in kwargs:
+                setattr(self, name, kwargs[name])
+
     def __repr__(self):
-        return (f"HODModel(z={self.z}, eps0={self.eps0:.3f}, "
+        return (f"{type(self).__name__}(z={self.z}, eps0={self.eps0:.3f}, "
                 f"Mc={self.Mc:.2e}, a={self.a:.2f}, b={self.b:.2f}, "
-                f"sigma_UV={self.sigma_UV:.2f})")
-    
+                f"{self._sigma_name}={self._sigma:.2f})")
+
     def __str__(self):
-        s = f"HOD Model at z={self.z}\n"
+        s = f"{type(self).__name__} at z={self.z}\n"
         s += "="*50 + "\n"
-        s += "UVHMR Parameters:\n"
+        s += "HMR Parameters:\n"
         s += f"  eps0 = {self.eps0:.3f}\n"
         s += f"  Mc = {self.Mc:.2e} M_sun\n"
         s += f"  a = {self.a:.2f}\n"
         s += f"  b = {self.b:.2f}\n"
         s += "\nHOD Parameters:\n"
-        s += f"  sigma_UV = {self.sigma_UV:.2f} mag\n"
+        s += f"  {self._sigma_name} = {self._sigma:.2f} {self._sigma_unit}\n"
         s += f"  Mcut = {self.Mcut:.2e} M_sun\n"
         s += f"  Msat = {self.Msat:.2e} M_sun\n"
         s += f"  asat = {self.asat:.2f}\n"
-        s += "\nSettings:\n"
-        s += f"  add_dust = {self.add_dust}\n"
+        settings = self._settings()
+        if settings:
+            s += "\nSettings:\n"
+            for k, v in settings.items():
+                s += f"  {k} = {v}\n"
         s += "="*50
         return s
 
 
+class UVHODModel(BaseHODModel, UVHMRModel):
+    """UV-selected Halo Occupation Distribution model.
+
+    Combines :class:`UVHMRModel` with central and satellite occupation
+    functions for samples brighter than a UV magnitude threshold.
+
+    Parameters
+    ----------
+    z : float
+        Redshift
+    eps0, Mc, a, b : float, optional
+        UVHMR parameters. Default from config.
+    sigma_UV : float, optional
+        Scatter in M_UV at fixed halo mass, in mag. Default from config.
+    Mcut, Msat, asat : float, optional
+        Satellite parameters. Default from config.
+    add_dust : bool, optional
+        Whether to include dust attenuation. Default is True.
+
+    Attributes
+    ----------
+    sigma_UV, Mcut, Msat, asat : float
+        HOD parameters
+
+    Examples
+    --------
+    >>> model = UVHODModel(z=6.0, sigma_UV=0.5)
+    >>> Mh = np.logspace(10, 13, 100)
+    >>> N_cen = model.Ncen(Mh, -19.0)   # M_UV < -19
+    >>> N_sat = model.Nsat(Mh, -19.0)
+    """
+
+    _sigma_name = 'sigma_UV'
+    _sigma_unit = 'mag'
+    _selection_sign = -1    # M_UV < thresh (brighter than)
+
+    def __init__(self, z, eps0=None, Mc=None, a=None, b=None,
+                 sigma_UV=None, Mcut=None, Msat=None, asat=None,
+                 add_dust=True):
+        super().__init__(z, eps0, Mc, a, b, sigma_UV, Mcut, Msat, asat,
+                         add_dust=add_dust)
+
+    def _selection_variable(self, Mh):
+        return self.MUV(Mh)
+
+
+class MstarHODModel(BaseHODModel, SHMRModel):
+    """Stellar-mass-selected Halo Occupation Distribution model.
+
+    Combines :class:`SHMRModel` with central and satellite occupation
+    functions for samples above a stellar mass threshold.
+
+    Parameters
+    ----------
+    z : float
+        Redshift
+    eps0, Mc, a, b : float, optional
+        SHMR parameters. Default from config.
+    sigma_Mstar : float, optional
+        Scatter in log10(Mstar) at fixed halo mass, in dex.
+        Default from config.
+    Mcut, Msat, asat : float, optional
+        Satellite parameters. Default from config.
+
+    Attributes
+    ----------
+    sigma_Mstar, Mcut, Msat, asat : float
+        HOD parameters
+
+    Examples
+    --------
+    >>> model = MstarHODModel(z=6.0, sigma_Mstar=0.3)
+    >>> Mh = np.logspace(10, 13, 100)
+    >>> N_cen = model.Ncen(Mh, 9.0)   # log10(Mstar/M_sun) > 9
+    """
+
+    _sigma_name = 'sigma_Mstar'
+    _sigma_unit = 'dex'
+    _selection_sign = +1    # log10(Mstar) > thresh (more massive than)
+
+    def __init__(self, z, eps0=None, Mc=None, a=None, b=None,
+                 sigma_Mstar=None, Mcut=None, Msat=None, asat=None):
+        super().__init__(z, eps0, Mc, a, b, sigma_Mstar, Mcut, Msat, asat)
+
+    def _selection_variable(self, Mh):
+        return np.log10(self.Mstar(Mh))
+
+
+# Backward-compatible alias: HODModel has always meant the UV-selected model.
+HODModel = UVHODModel
+
+
+#: Sentinel for "leave unchanged" in update_correlation_model, so that
+#: ``None`` can mean "no second threshold".
+_UNSET = object()
+
 
 class Observables:
     """Compute observables from an HOD model.
-    
-    This class provides methods to compute various observables like
-    luminosity functions, galaxy bias, and correlation functions from
-    an HOD model.
-    
+
+    Base class for :class:`UVObservables` and :class:`MstarObservables`.
+    Calling ``Observables(model)`` directly returns the subclass matching
+    the model type, so ``Observables(UVHODModel(...))`` is a
+    :class:`UVObservables` and ``Observables(MstarHODModel(...))`` a
+    :class:`MstarObservables`.
+
+    The generic methods work in terms of the model's *selection variable*
+    ``x`` (M_UV for UV models, log10 Mstar for stellar-mass models) and a
+    threshold ``thresh`` on it; see :meth:`BaseHODModel.Ncen`. Subclasses add
+    named wrappers (``luminosity_function``, ``stellar_mass_function``).
+
     All observable methods accept optional ``**params`` keyword arguments
-    (eps0, Mc, a, b, sigma_UV, Mcut, Msat, asat) to update the underlying
-    HOD model before computing. This enables efficient MCMC loops without
-    recreating any objects.
-    
+    (any of ``hod_model.param_names()``) to update the underlying HOD model
+    before computing. This enables efficient MCMC loops without recreating
+    any objects.
+
     For correlation functions specifically, use the initialize/update pattern:
     1. Call initialize_correlation_model() once
     2. Call update_correlation_model() in your MCMC loop
-    
+
     Parameters
     ----------
-    hod_model : HODModel
+    hod_model : BaseHODModel
         The HOD model to use for computations
-        
+
     Attributes
     ----------
-    hod_model : HODModel
+    hod_model : BaseHODModel
         The underlying HOD model
-        
+
     Examples
     --------
-    >>> # Basic usage
-    >>> model = HODModel(z=6.0)
-    >>> obs = Observables(model)
+    >>> obs = Observables(UVHODModel(z=6.0))        # -> UVObservables
     >>> MUV = np.linspace(-22, -16, 20)
     >>> phi = obs.luminosity_function(MUV)
-    
+
     >>> # MCMC fitting - all observables support inline parameter updates
-    >>> obs = Observables(HODModel(z=6.0))
     >>> for eps0, sigma_UV in mcmc_samples:
     ...     phi = obs.luminosity_function(MUV, eps0=eps0, sigma_UV=sigma_UV)
     ...     bg = obs.galaxy_bias(MUV, eps0=eps0, sigma_UV=sigma_UV)
-    
+
     >>> # Correlation function MCMC (uses halomod caching)
     >>> obs.initialize_correlation_model(MUV_thresh1=-19.1)
     >>> for eps0, sigma_UV in mcmc_samples:
     ...     result = obs.update_correlation_model(eps0=eps0, sigma_UV=sigma_UV)
     ...     w_theta = result['correlation']
     """
-    
-    # HOD parameter names accepted by update_parameters
-    _HOD_PARAM_NAMES = frozenset([
-    'z', 'eps0', 'Mc', 'a', 'b', 'sigma_UV', 'Mcut', 'Msat', 'asat', 'add_dust'
-])
-    
+
+    #: HOD model class this observables class works with (set by subclasses).
+    _model_class = None
+    #: Halomod HOD wrapper used for correlation functions (set by subclasses).
+    _halomod_hod_class = None
+
+    def __new__(cls, hod_model=None, *args, **kwargs):
+        # Observables(model) dispatches on the model type. hod_model defaults
+        # to None so that unpickling (which calls cls.__new__(cls)) works.
+        if cls is Observables:
+            for sub in cls.__subclasses__():
+                if sub._model_class is not None and isinstance(hod_model, sub._model_class):
+                    cls = sub
+                    break
+            else:
+                raise TypeError(
+                    f"No Observables subclass for {type(hod_model).__name__}; "
+                    "expected a UVHODModel or MstarHODModel."
+                )
+        return super().__new__(cls)
+
     def __init__(self, hod_model):
         """Initialize observables calculator.
-        
+
         Parameters
         ----------
-        hod_model : HODModel
+        hod_model : BaseHODModel
             The HOD model to use
         """
+        if not isinstance(hod_model, self._model_class):
+            raise TypeError(
+                f"{type(self).__name__} requires a {self._model_class.__name__}, "
+                f"got {type(hod_model).__name__}"
+            )
         self.hod_model = hod_model
         self._hmf_cache = {}
-        
+
         # For efficient correlation function updates
         self._halomod_model = None
         self._halomod_config = {}
         self._hod_wrapper = None
-    
+
     def _apply_params(self, params):
         """Apply parameter updates to the underlying HOD model.
-        
-        Extracts recognized HOD parameters from ``params``, applies them
-        to ``self.hod_model``, and returns any remaining kwargs.
 
         Parameters
         ----------
@@ -442,7 +767,8 @@ class Observables:
         Returns
         -------
         remaining : dict
-            Any kwargs that are not HOD parameters (passed through).
+            Any kwargs that are not HOD parameters (always empty: unknown
+            keys raise).
 
         Raises
         ------
@@ -452,12 +778,13 @@ class Observables:
             ``sigmaUV`` for ``sigma_UV`` was silently ignored and the whole
             calculation quietly ran at the default value.
         """
-        hod_updates = {k: v for k, v in params.items() if k in self._HOD_PARAM_NAMES}
-        remaining = {k: v for k, v in params.items() if k not in self._HOD_PARAM_NAMES}
+        names = self.hod_model.param_names()
+        hod_updates = {k: v for k, v in params.items() if k in names}
+        remaining = {k: v for k, v in params.items() if k not in names}
         if remaining:
             raise TypeError(
                 f"unrecognised parameter(s) {sorted(remaining)}; expected any "
-                f"of {sorted(self._HOD_PARAM_NAMES)}"
+                f"of {sorted(names)}"
             )
         if hod_updates:
             self.hod_model.update_parameters(**hod_updates)
@@ -509,190 +836,198 @@ class Observables:
             )
             self._hmf_cache[cache_key] = (log10_Mh, hmf)
         return self._hmf_cache[cache_key]
-    
-    
-    def luminosity_function(self, MUV_arr, dMUV=0.05, **params):
-        """Compute UV luminosity function.
-        
+
+    def _bin_occupation(self, Mh, x, dx):
+        """Mean galaxies per halo with selection variable in [x - dx/2, x + dx/2].
+
+        ``Ngal(Mh, thresh)`` counts galaxies on the selected side of
+        ``thresh``, so a bin is the difference of two thresholds, signed so
+        that it is positive whichever side the model selects on.
+        """
+        s = self.hod_model._selection_sign
+        return s * (self.hod_model.Ngal(Mh, x - dx/2)
+                    - self.hod_model.Ngal(Mh, x + dx/2))
+
+    def abundance_function(self, x_arr, dx=0.05, **params):
+        """Abundance per unit selection variable, e.g. the UVLF or SMF.
+
         Parameters
         ----------
-        MUV_arr : array_like
-            Array of UV absolute magnitudes
-        dMUV : float, optional
-            Magnitude bin width. Default is 0.05.
+        x_arr : array_like
+            Values of the selection variable (M_UV or log10 Mstar)
+        dx : float, optional
+            Bin width. Default is 0.05.
         **params : dict, optional
-            HOD parameter overrides (eps0, Mc, a, b, sigma_UV, Mcut,
-            Msat, asat, add_dust). Applied to the model before computing.
-            
+            HOD parameter overrides. Applied to the model before computing.
+
         Returns
         -------
         phi : ndarray
-            Luminosity function Φ(M_UV) in Mpc^-3 mag^-1
-            
-        Examples
-        --------
-        >>> obs.luminosity_function(MUV)                          # current params
-        >>> obs.luminosity_function(MUV, eps0=0.3, sigma_UV=0.5)  # override
+            Abundance in Mpc^-3 per unit x (mag^-1 or dex^-1)
         """
         self._apply_params(params)
-        
+
         # astype(float): np.arange(-22, -16) is integer, and zeros_like
-        # would then silently return an all-zero integer luminosity function.
-        MUV_arr = np.atleast_1d(MUV_arr).astype(float)
+        # would then silently return an all-zero integer abundance.
+        x_arr = np.atleast_1d(x_arr).astype(float)
         log10_Mh, hmf = self._get_hmf()
         Mh = 10**log10_Mh
-        
-        phi = np.zeros_like(MUV_arr)
-        
-        for i, muv in enumerate(MUV_arr):
-            # Number in magnitude bin
-            N_cen_bin = (self.hod_model.Ncen(Mh, muv + dMUV/2) - 
-                        self.hod_model.Ncen(Mh, muv - dMUV/2))
-            N_sat_bin = (self.hod_model.Nsat(Mh, muv + dMUV/2) - 
-                        self.hod_model.Nsat(Mh, muv - dMUV/2))
-            
-            integrand = (N_cen_bin + N_sat_bin) * hmf
-            phi[i] = integrate.simpson(integrand, x=log10_Mh) / dMUV
-        
+
+        phi = np.zeros_like(x_arr)
+        for i, x in enumerate(x_arr):
+            integrand = self._bin_occupation(Mh, x, dx) * hmf
+            phi[i] = integrate.simpson(integrand, x=log10_Mh) / dx
+
         return phi
-    
-    def galaxy_bias(self, MUV_arr, dMUV=0.05, **params):
-        """Compute galaxy bias as a function of UV magnitude.
-        
+
+    def galaxy_bias(self, x_arr, dx=0.05, **params):
+        """Galaxy bias in bins of the selection variable.
+
         Parameters
         ----------
-        MUV_arr : array_like
-            Array of UV absolute magnitudes
-        dMUV : float, optional
-            Magnitude bin width
+        x_arr : array_like
+            Values of the selection variable (M_UV or log10 Mstar)
+        dx : float, optional
+            Bin width. Default is 0.05.
         **params : dict, optional
-            HOD parameter overrides (eps0, Mc, a, b, sigma_UV, Mcut,
-            Msat, asat, add_dust). Applied to the model before computing.
-            
+            HOD parameter overrides. Applied to the model before computing.
+
         Returns
         -------
         bias : ndarray
             Galaxy bias
         """
         self._apply_params(params)
-        
-        MUV_arr = np.atleast_1d(MUV_arr).astype(float)  # see luminosity_function
+
+        x_arr = np.atleast_1d(x_arr).astype(float)  # see abundance_function
         log10_Mh, hmf = self._get_hmf()
         Mh = 10**log10_Mh
         bias_halo = get_halo_bias(Mh, self.hod_model.z, mdef='vir', model='tinker10')
-        
-        bg = np.zeros_like(MUV_arr)
-        
-        for i, muv in enumerate(MUV_arr):
-            N_cen_bin = (self.hod_model.Ncen(Mh, muv + dMUV/2) - 
-                        self.hod_model.Ncen(Mh, muv - dMUV/2))
-            N_sat_bin = (self.hod_model.Nsat(Mh, muv + dMUV/2) - 
-                        self.hod_model.Nsat(Mh, muv - dMUV/2))
-            
-            bg_integrand = (N_cen_bin + N_sat_bin) * hmf * bias_halo
-            ngal_integrand = (N_cen_bin + N_sat_bin) * hmf
-            
-            ngal = integrate.simpson(ngal_integrand, x=log10_Mh)
-            
+
+        bg = np.zeros_like(x_arr)
+        for i, x in enumerate(x_arr):
+            N_bin = self._bin_occupation(Mh, x, dx)
+            ngal = integrate.simpson(N_bin * hmf, x=log10_Mh)
             if ngal > 0:
-                bg[i] = integrate.simpson(bg_integrand, x=log10_Mh) / ngal
+                bg[i] = integrate.simpson(N_bin * hmf * bias_halo, x=log10_Mh) / ngal
             else:
                 bg[i] = 0.0
-        
+
         return bg
-    
-    def mean_halo_mass(self, MUV_thresh, **params):
-        """Compute mean halo mass for galaxies brighter than threshold.
-        
+
+    def mean_halo_mass(self, thresh, **params):
+        """Mean halo mass of galaxies passing ``thresh``.
+
         Parameters
         ----------
-        MUV_thresh : float
-            UV magnitude threshold
+        thresh : float
+            Sample threshold on the selection variable
         **params : dict, optional
             HOD parameter overrides.
-            
+
         Returns
         -------
         log10_Mh_mean : float
-            Mean log10 halo mass
+            log10 of the mean halo mass
         """
         self._apply_params(params)
-        
+
         log10_Mh, hmf = self._get_hmf()
         Mh = 10**log10_Mh
-        
-        N_gal = self.hod_model.Ngal(Mh, MUV_thresh)
-        
-        mh_integrand = N_gal * hmf * Mh
-        ngal_integrand = N_gal * hmf
-        
-        ngal = integrate.simpson(ngal_integrand, x=log10_Mh)
-        
+        N_gal = self.hod_model.Ngal(Mh, thresh)
+
+        ngal = integrate.simpson(N_gal * hmf, x=log10_Mh)
         if ngal > 0:
-            mh_mean = integrate.simpson(mh_integrand, x=log10_Mh) / ngal
+            mh_mean = integrate.simpson(N_gal * hmf * Mh, x=log10_Mh) / ngal
             return np.log10(mh_mean)
-        else:
-            return np.nan
-    
-    def mean_bias(self, MUV_thresh, **params):
-        """Compute mean galaxy bias for galaxies brighter than threshold.
-        
+        return np.nan
+
+    def mean_bias(self, thresh, **params):
+        """Mean galaxy bias of galaxies passing ``thresh``.
+
         Parameters
         ----------
-        MUV_thresh : float
-            UV magnitude threshold
+        thresh : float
+            Sample threshold on the selection variable
         **params : dict, optional
             HOD parameter overrides.
-            
+
         Returns
         -------
         bias_mean : float
             Mean galaxy bias
         """
         self._apply_params(params)
-        
+
         log10_Mh, hmf = self._get_hmf()
         Mh = 10**log10_Mh
         bias_halo = get_halo_bias(Mh, self.hod_model.z, mdef='vir', model='tinker10')
-        
-        N_gal = self.hod_model.Ngal(Mh, MUV_thresh)
-        
-        bg_integrand = N_gal * hmf * bias_halo
-        ngal_integrand = N_gal * hmf
-        
-        ngal = integrate.simpson(ngal_integrand, x=log10_Mh)
-        
+        N_gal = self.hod_model.Ngal(Mh, thresh)
+
+        ngal = integrate.simpson(N_gal * hmf, x=log10_Mh)
         if ngal > 0:
-            return integrate.simpson(bg_integrand, x=log10_Mh) / ngal
-        else:
-            return np.nan
-    
-    def number_density(self, MUV_thresh, **params):
-        """Compute cumulative galaxy number density brighter than threshold.
-        
+            return integrate.simpson(N_gal * hmf * bias_halo, x=log10_Mh) / ngal
+        return np.nan
+
+    def number_density(self, thresh, **params):
+        """Cumulative number density of galaxies passing ``thresh``.
+
         Parameters
         ----------
-        MUV_thresh : float
-            UV magnitude threshold
+        thresh : float
+            Sample threshold on the selection variable
         **params : dict, optional
             HOD parameter overrides.
-            
+
         Returns
         -------
         n_gal : float
             Galaxy number density in Mpc^-3
         """
         self._apply_params(params)
-        
+
         log10_Mh, hmf = self._get_hmf()
         Mh = 10**log10_Mh
-        
-        N_gal = self.hod_model.Ngal(Mh, MUV_thresh)
-        integrand = N_gal * hmf
-        
-        return integrate.simpson(integrand, x=log10_Mh)
-    
-    def initialize_correlation_model(self, MUV_thresh1, MUV_thresh2=0,
+        N_gal = self.hod_model.Ngal(Mh, thresh)
+
+        return integrate.simpson(N_gal * hmf, x=log10_Mh)
+
+    # ------------------------------------------------------------------
+    # Correlation functions (halomod)
+    # ------------------------------------------------------------------
+    def _halomod_hod_params(self):
+        """Current HOD parameters in the form the halomod wrapper expects."""
+        cfg = self._halomod_config
+        params = {n: getattr(self.hod_model, n)
+                  for n in self.hod_model.param_names()}
+        params.update(z=cfg['z_center'], thresh1=cfg['thresh1'],
+                      thresh2=cfg['thresh2'], h=cfg['h'], M_min=cfg['M_min'])
+        return params
+
+    def _correlation_result(self):
+        """Separation and correlation arrays from the cached halomod model."""
+        correlation_type = self._halomod_config['correlation_type']
+        h = self._halomod_config['h']
+        kind = correlation_type.lower()
+        if kind == 'angular':
+            separation = self._halomod_model.theta * (180.0 / np.pi) * 3600.0
+            correlation = self._halomod_model.angular_corr_gal
+        elif kind == 'real':
+            separation = self._halomod_model.r / h
+            correlation = self._halomod_model.corr_auto_tracer
+        elif kind == 'projected':
+            separation = self._halomod_model.rp / h
+            correlation = self._halomod_model.projected_corr_gal
+        else:
+            raise ValueError(f"Unknown correlation_type: {correlation_type}")
+        return {
+            'model': self._halomod_model,
+            'separation': separation,
+            'correlation': correlation,
+            'type': correlation_type,
+        }
+
+    def initialize_correlation_model(self, thresh1, thresh2=None,
                                     cosmo_model=None, correlation_type='angular',
                                     zmin=None, zmax=None, znum=150,
                                     p1=None,
@@ -707,36 +1042,35 @@ class Observables:
                                     sd_bias_model=None,
                                     **kwargs):
         """Initialize halomod model for efficient parameter updates.
-        
+
         Call this once before MCMC fitting. Then use update_correlation_model()
         to efficiently update HOD parameters.
-        
+
         This creates and caches the halomod model, allowing fast parameter
         updates via halomod's update() method.
-        
-        Parameters are the same as compute_correlation_function().
-        
+
+        Parameters
+        ----------
+        thresh1 : float
+            Sample threshold on the selection variable. On its own it defines
+            a threshold sample.
+        thresh2 : float, optional
+            Second bound for a binned sample, on the *selected* side of
+            ``thresh1`` (brighter for UV, more massive for Mstar). ``None``
+            (default) gives a threshold sample.
+        correlation_type : {'angular', 'real', 'projected'}
+            Which correlation function to compute.
+        **kwargs
+            Remaining halomod settings (see source for defaults).
+
         Returns
         -------
         result : dict
             Dictionary with 'model', 'separation', 'correlation', 'type'
-            
-        Examples
-        --------
-        >>> # Initialize once
-        >>> obs = Observables(model)
-        >>> result = obs.initialize_correlation_model(
-        ...     MUV_thresh1=-19.1, correlation_type='angular'
-        ... )
-        >>> 
-        >>> # Update efficiently in MCMC loop
-        >>> for eps0 in mcmc_chain:
-        ...     result = obs.update_correlation_model(eps0=eps0)
-        ...     chi2 = compute_chi2(result['correlation'], data)
         """
         if not HALOMOD_AVAILABLE:
             raise ImportError("halomod package required")
-        
+
         # Set up redshift range
         z_center = self.hod_model.z
         if zmin is None:
@@ -767,8 +1101,8 @@ class Observables:
         
         # Store configuration for updates
         self._halomod_config = {
-            'MUV_thresh1': MUV_thresh1,
-            'MUV_thresh2': MUV_thresh2,
+            'thresh1': thresh1,
+            'thresh2': thresh2,
             'correlation_type': correlation_type,
             'h': h,
             'z_center': z_center,
@@ -776,8 +1110,8 @@ class Observables:
             'zmax': zmax,
             'znum': znum,
             'cosmo_params': cosmo_params,
+            'M_min': kwargs.pop('M_min', 9.0),
         }
-
 
         # Halomod parameters
         halomod_params = {
@@ -800,26 +1134,11 @@ class Observables:
             'exclusion_model': exclusion_model,
             'bias_model': bias_model,
             'sd_bias_model': sd_bias_model,
-            'hod_model' : HalomodHOD,
-            'hod_params' : {
-                'z' : z_center,
-                'MUV_thresh1' : MUV_thresh1,
-                'MUV_thresh2' : MUV_thresh2,
-                'eps0' : self.hod_model.eps0,
-                'Mc' : self.hod_model.Mc,
-                'a' : self.hod_model.a,
-                'b' : self.hod_model.b,
-                'sigma_UV' : self.hod_model.sigma_UV,
-                'Mcut' : self.hod_model.Mcut,
-                'Msat' : self.hod_model.Msat,
-                'asat' : self.hod_model.asat,
-                'add_dust' : self.hod_model.add_dust,
-                'h' : h,
-                'M_min': kwargs.pop('M_min', 9.0)}
+            'hod_model' : self._halomod_hod_class,
+            'hod_params' : self._halomod_hod_params(),
         }
 
         halomod_params.update(kwargs)
-
 
         if correlation_type.lower() == 'angular':
             theta_min_rad = theta_min / 3600.0 * (np.pi / 180.0)
@@ -844,16 +1163,10 @@ class Observables:
                 dr_table=kwargs.pop('dr_table', 0.03),
                 **halomod_params)
             
-            separation = self._halomod_model.theta * (180.0 / np.pi) * 3600.0
-            correlation = self._halomod_model.angular_corr_gal
-            
         elif correlation_type.lower() == 'real':
             self._halomod_model = halomod.TracerHaloModel(
                 **halomod_params
             )
-            
-            separation = self._halomod_model.r / h
-            correlation = self._halomod_model.corr_auto_tracer
             
         elif correlation_type.lower() == 'projected':
             self._halomod_model = halomod.ProjectedCF(
@@ -864,68 +1177,42 @@ class Observables:
                 **halomod_params
             )
             
-            separation = self._halomod_model.r / h
-            correlation = self._halomod_model.projected_corr_gal
-            
         else:
             raise ValueError(f"Unknown correlation_type: {correlation_type}")
-        
-        return {
-            'model': self._halomod_model,
-            'separation': separation,
-            'correlation': correlation,
-            'type': correlation_type,
-        }
-    
-    def update_correlation_model(self, z_center=None, p_of_z=None, MUV_thresh1=None, MUV_thresh2=None,
-                                eps0=None, Mc=None, a=None, b=None,
-                                sigma_UV=None, Mcut=None, Msat=None, asat=None):
+
+        return self._correlation_result()
+
+    def update_correlation_model(self, z_center=None, p_of_z=None,
+                                 thresh1=_UNSET, thresh2=_UNSET, **params):
         """Update HOD parameters and recompute correlation function efficiently.
-        
+
         This uses halomod's update() method to efficiently recompute the
         correlation function with new parameters, without recreating the
         entire model.
-        
+
         Must call initialize_correlation_model() first.
-        
+
         Parameters
         ----------
         z_center : float, optional
             Update the redshift center
         p_of_z : callable, optional
             Update the redshift distribution function
-        MUV_thresh1 : float, optional
-            Update UV magnitude threshold
-        MUV_thresh2 : float, optional
-            Update faint-end threshold
-        eps0 : float, optional
-            Update star formation efficiency
-        Mc : float, optional
-            Update characteristic mass
-        a : float, optional
-            Update low-mass slope
-        b : float, optional
-            Update high-mass slope
-        sigma_UV : float, optional
-            Update UV scatter
-        Mcut : float, optional
-            Update satellite cutoff mass
-        Msat : float, optional
-            Update satellite normalization mass
-        asat : float, optional
-            Update satellite slope
-            
+        thresh1, thresh2 : float or None, optional
+            Update the sample thresholds. Omit to leave unchanged;
+            ``thresh2=None`` switches to a threshold sample.
+        **params
+            HOD parameter updates (any of ``hod_model.param_names()``).
+            ``None`` values are ignored (left unchanged).
+
         Returns
         -------
         result : dict
             Dictionary with 'model', 'separation', 'correlation', 'type'
-            
+
         Examples
         --------
-        >>> # Initialize once
-        >>> result = obs.initialize_correlation_model(MUV_thresh1=-19.1)
-        >>> 
-        >>> # Update in MCMC loop
+        >>> result = obs.initialize_correlation_model(-19.1)
         >>> for eps0, sigma_UV in zip(eps0_chain, sigma_UV_chain):
         ...     result = obs.update_correlation_model(
         ...         eps0=eps0, sigma_UV=sigma_UV
@@ -937,228 +1224,285 @@ class Observables:
                 "Must call initialize_correlation_model() before update_correlation_model(). "
                 "Or use compute_correlation_function() for one-off calculations."
             )
-        
-        # Update HODModel parameters
-        update_dict = {}
-        if eps0 is not None:
-            update_dict['eps0'] = eps0
-        if Mc is not None:
-            update_dict['Mc'] = Mc
-        if a is not None:
-            update_dict['a'] = a
-        if b is not None:
-            update_dict['b'] = b
-        if sigma_UV is not None:
-            update_dict['sigma_UV'] = sigma_UV
-        if Mcut is not None:
-            update_dict['Mcut'] = Mcut
-        if Msat is not None:
-            update_dict['Msat'] = Msat
-        if asat is not None:
-            update_dict['asat'] = asat
-        
-        if update_dict:
-            self.hod_model.update_parameters(**update_dict)
-        
-        # Update magnitude thresholds if provided
-        if MUV_thresh1 is not None:
-            self._halomod_config['MUV_thresh1'] = MUV_thresh1
-        if MUV_thresh2 is not None:
-            self._halomod_config['MUV_thresh2'] = MUV_thresh2
-        
-        # Update z_center if provided
+
+        self._apply_params({k: v for k, v in params.items() if v is not None})
+
+        if thresh1 is not _UNSET:
+            self._halomod_config['thresh1'] = thresh1
+        if thresh2 is not _UNSET:
+            self._halomod_config['thresh2'] = thresh2
         if z_center is not None:
             self._halomod_config['z_center'] = z_center
-        
-        # Build HOD params update dict (always include current values)
-        hod_params_update = {
-            'z': self._halomod_config['z_center'],
-            'MUV_thresh1': self._halomod_config['MUV_thresh1'],
-            'MUV_thresh2': self._halomod_config['MUV_thresh2'],
-            'eps0': self.hod_model.eps0,
-            'Mc': self.hod_model.Mc,
-            'a': self.hod_model.a,
-            'b': self.hod_model.b,
-            'sigma_UV': self.hod_model.sigma_UV,
-            'Mcut': self.hod_model.Mcut,
-            'Msat': self.hod_model.Msat,
-            'asat': self.hod_model.asat,
-            'add_dust': self.hod_model.add_dust,
-        }
-        
-        # Build halomod update dict (only include non-None values)
-        halomod_update = {'hod_params': hod_params_update}
-        
+
+        # Always pass the full current HOD parameter set
+        halomod_update = {'hod_params': self._halomod_hod_params()}
         if z_center is not None:
             halomod_update['z'] = z_center
-        
         if p_of_z is not None:
             halomod_update['p1'] = p_of_z
-        
-        # Update halomod model efficiently
-        self._halomod_model.update(**halomod_update)
-        
-        # Extract updated results
-        correlation_type = self._halomod_config['correlation_type']
-        h = self._halomod_config['h']
-        
-        if correlation_type.lower() == 'angular':
-            separation = self._halomod_model.theta * (180.0 / np.pi) * 3600.0
-            correlation = self._halomod_model.angular_corr_gal
-        elif correlation_type.lower() == 'real':
-            separation = self._halomod_model.r / h
-            correlation = self._halomod_model.corr_auto_tracer
-        elif correlation_type.lower() == 'projected':
-            separation = self._halomod_model.rp / h
-            correlation = self._halomod_model.projected_corr_gal
-        
-        return {
-            'model': self._halomod_model,
-            'separation': separation,
-            'correlation': correlation,
-            'type': correlation_type,
-        }
 
-    
-    def compute_correlation_function(self, MUV_thresh1, MUV_thresh2=0, **kwargs):
+        self._halomod_model.update(**halomod_update)
+
+        return self._correlation_result()
+
+    def compute_correlation_function(self, thresh1, thresh2=None, **kwargs):
         """Compute correlation function (convenience method).
-        
+
         This creates a new halomod model each time. For MCMC fitting,
         use initialize_correlation_model() + update_correlation_model() instead.
-        
+
         Parameters are the same as initialize_correlation_model().
-        
+
         Returns
         -------
         result : dict
             Dictionary with 'model', 'separation', 'correlation', 'type'
         """
-        return self.initialize_correlation_model(
-            MUV_thresh1, MUV_thresh2, **kwargs
-        )
-    
+        return self.initialize_correlation_model(thresh1, thresh2, **kwargs)
+
+
+class UVObservables(Observables):
+    """Observables for a :class:`UVHODModel`.
+
+    Thresholds are UV absolute magnitudes; a sample "passes" when it is
+    brighter (more negative) than the threshold. Keeps the ``MUV``-named
+    API, including the ``MUV_thresh2=0`` convention for "no bright limit".
+
+    Examples
+    --------
+    >>> obs = UVObservables(UVHODModel(z=6.0))
+    >>> phi = obs.luminosity_function(np.linspace(-22, -16, 20))
+    >>> n = obs.number_density(-19.0)
+    """
+
+    _model_class = UVHODModel
+
+    @staticmethod
+    def _bright_limit(MUV_thresh2):
+        """Map the UV ``MUV_thresh2 = 0`` "no bright limit" convention to None."""
+        if MUV_thresh2 is None or MUV_thresh2 >= 0:
+            return None
+        return MUV_thresh2
+
+    def luminosity_function(self, MUV_arr, dMUV=0.05, **params):
+        """UV luminosity function Φ(M_UV) in Mpc^-3 mag^-1.
+
+        Parameters
+        ----------
+        MUV_arr : array_like
+            UV absolute magnitudes
+        dMUV : float, optional
+            Magnitude bin width. Default is 0.05.
+        **params : dict, optional
+            HOD parameter overrides (eps0, Mc, a, b, sigma_UV, Mcut,
+            Msat, asat, add_dust). Applied to the model before computing.
+
+        Examples
+        --------
+        >>> obs.luminosity_function(MUV)                          # current params
+        >>> obs.luminosity_function(MUV, eps0=0.3, sigma_UV=0.5)  # override
+        """
+        return self.abundance_function(MUV_arr, dMUV, **params)
+
+    def galaxy_bias(self, MUV_arr, dMUV=0.05, **params):
+        """Galaxy bias in UV magnitude bins of width ``dMUV``."""
+        return super().galaxy_bias(MUV_arr, dMUV, **params)
+
+    def mean_halo_mass(self, MUV_thresh, **params):
+        """log10 mean halo mass of galaxies brighter than ``MUV_thresh``."""
+        return super().mean_halo_mass(MUV_thresh, **params)
+
+    def mean_bias(self, MUV_thresh, **params):
+        """Mean galaxy bias of galaxies brighter than ``MUV_thresh``."""
+        return super().mean_bias(MUV_thresh, **params)
+
+    def number_density(self, MUV_thresh, **params):
+        """Number density (Mpc^-3) of galaxies brighter than ``MUV_thresh``."""
+        return super().number_density(MUV_thresh, **params)
+
+    def initialize_correlation_model(self, MUV_thresh1, MUV_thresh2=0, **kwargs):
+        """Initialize the halomod correlation model for a UV sample.
+
+        Parameters
+        ----------
+        MUV_thresh1 : float
+            Faint magnitude limit of the sample.
+        MUV_thresh2 : float, optional
+            Bright magnitude limit for a magnitude bin (more negative than
+            ``MUV_thresh1``). 0 (default) gives a threshold sample.
+        **kwargs
+            See :meth:`Observables.initialize_correlation_model`.
+        """
+        return super().initialize_correlation_model(
+            MUV_thresh1, self._bright_limit(MUV_thresh2), **kwargs)
+
+    def update_correlation_model(self, z_center=None, p_of_z=None,
+                                 MUV_thresh1=None, MUV_thresh2=None, **params):
+        """Update the halomod correlation model; see the base class.
+
+        ``MUV_thresh1``/``MUV_thresh2`` left as None are unchanged;
+        ``MUV_thresh2=0`` switches to a threshold sample.
+        """
+        return super().update_correlation_model(
+            z_center=z_center, p_of_z=p_of_z,
+            thresh1=_UNSET if MUV_thresh1 is None else MUV_thresh1,
+            thresh2=_UNSET if MUV_thresh2 is None else self._bright_limit(MUV_thresh2),
+            **params)
+
+    def compute_correlation_function(self, MUV_thresh1, MUV_thresh2=0, **kwargs):
+        """One-off correlation function; see :meth:`initialize_correlation_model`."""
+        return self.initialize_correlation_model(MUV_thresh1, MUV_thresh2, **kwargs)
+
+
+class MstarObservables(Observables):
+    """Observables for a :class:`MstarHODModel`.
+
+    Thresholds are log10(Mstar / M_sun); a sample "passes" when it is more
+    massive than the threshold. For correlation functions, ``thresh2`` is
+    the upper mass limit of a bin (``None`` for a threshold sample).
+
+    Examples
+    --------
+    >>> obs = MstarObservables(MstarHODModel(z=6.0))
+    >>> phi = obs.stellar_mass_function(np.linspace(8, 11, 13))
+    >>> n = obs.number_density(9.0)        # log10(Mstar/M_sun) > 9
+    """
+
+    _model_class = MstarHODModel
+
+    def stellar_mass_function(self, log10_Mstar_arr, dlog10_Mstar=0.05, **params):
+        """Stellar mass function Φ(log10 Mstar) in Mpc^-3 dex^-1.
+
+        Parameters
+        ----------
+        log10_Mstar_arr : array_like
+            log10(Mstar / M_sun)
+        dlog10_Mstar : float, optional
+            Bin width in dex. Default is 0.05.
+        **params : dict, optional
+            HOD parameter overrides (eps0, Mc, a, b, sigma_Mstar, Mcut,
+            Msat, asat). Applied to the model before computing.
+        """
+        return self.abundance_function(log10_Mstar_arr, dlog10_Mstar, **params)
 
 
 class HalomodHOD(halomod.hod.HODPoisson if HALOMOD_AVAILABLE else object):
-    """Halomod-compatible HOD class wrapping the HODModel.
+    """Halomod-compatible HOD wrapping a :class:`BaseHODModel`.
 
-    This class bridges our HODModel with halomod's expectations.
-    
-    IMPORTANT: Handles unit conversions between halomod (M_sun/h) and 
-    HODModel (M_sun).
+    Base class for :class:`HalomodUVHOD` and :class:`HalomodMstarHOD`, which
+    set ``_model_class``. Bridges our HOD models with halomod's expectations.
+
+    IMPORTANT: Handles unit conversions between halomod (M_sun/h) and the
+    HOD models (M_sun).
 
     Parameters
     ----------
     z : float
         Redshift
-    MUV_thresh1 : float, optional
-        Faint magnitude limit of the sample (the least negative bound).
-        On its own it defines a threshold sample of everything brighter.
-    MUV_thresh2 : float, optional
-        Bright magnitude limit, for a magnitude-binned sample. Must be more
-        negative (brighter) than ``MUV_thresh1``. Leave at the default (0.0)
-        for a threshold sample. Occupations are formed as
-        ``N(MUV_thresh1) - N(MUV_thresh2)``, so the reverse order would give
-        negative occupations.
-    eps0, Mc, a, b, sigma_UV, Mcut, Msat, asat, add_dust : optional
-        HOD parameters. Default from config.
+    thresh1 : float, optional
+        Sample threshold on the model's selection variable. On its own it
+        defines a threshold sample.
+    thresh2 : float, optional
+        Second bound for a binned sample, on the *selected* side of
+        ``thresh1`` (brighter for UV, more massive for Mstar). Occupations
+        are formed as ``N(thresh1) - N(thresh2)``, so the reverse order
+        would give negative occupations. ``None`` for a threshold sample.
     h : float, optional
         Hubble parameter H0/100
-        
-    Examples
-    --------
-    >>> hod = HalomodHOD(z=5.0, MUV_thresh1=-19.1, h=0.7)
+    M_min : float, optional
+        Stored for halomod; not used by the occupations.
+    **kwargs
+        HOD model parameters (any of ``_model_class.param_names()``; None
+        means the model default). Anything else is passed to halomod.
     """
 
-    _defaults = {
-        "z": 5.0,
-        "MUV_thresh1": -16.0,
-        "MUV_thresh2": 0.0,
-        "eps0": None,
-        "Mc": None,
-        "a": None,
-        "b": None,
-        "sigma_UV": None,
-        "Mcut": None,
-        "Msat": None,
-        "asat": None,
-        "add_dust": True,
-        "M_min": 8.0, 
-    }
+    _model_class = None
 
-    def __init__(self, z=None, MUV_thresh1=None, MUV_thresh2=None,
-                 eps0=None, Mc=None, a=None, b=None,
-                 sigma_UV=None, Mcut=None, Msat=None, asat=None,
-                 add_dust=None, h=None, M_min=None, **kwargs):
+    def __init__(self, z=None, thresh1=None, thresh2=None, h=None, M_min=None,
+                 **kwargs):
         """Initialize halomod HOD wrapper."""
         if not HALOMOD_AVAILABLE:
             raise ImportError("halomod package required")
-        
-        super().__init__(**kwargs)
-        
-        from .config import DEFAULT_HOD_PARAMS, DEFAULT_COSMO_PARAMS
-        
-        # Set parameters
-        self.z = z if z is not None else self._defaults['z']
-        self.MUV_thresh1 = MUV_thresh1 if MUV_thresh1 is not None else self._defaults['MUV_thresh1']
-        self.MUV_thresh2 = MUV_thresh2 if MUV_thresh2 is not None else self._defaults['MUV_thresh2']
 
-        # A bin is formed as N(thresh1) - N(thresh2), so thresh2 must be the
-        # BRIGHTER (more negative) bound. The reverse order yields negative
+        model_names = self._model_class.param_names()
+        model_params = {k: kwargs.pop(k) for k in list(kwargs) if k in model_names}
+        model_params = {k: v for k, v in model_params.items() if v is not None}
+
+        super().__init__(**kwargs)
+
+        from .config import DEFAULT_COSMO_PARAMS
+
+        self.z = z if z is not None else self._defaults['z']
+        self.thresh1 = thresh1 if thresh1 is not None else self._defaults['thresh1']
+        self.thresh2 = thresh2
+
+        # A bin is formed as N(thresh1) - N(thresh2), so thresh2 must lie on
+        # the selected side of thresh1. The reverse order yields negative
         # occupations, and hence a negative mean_tracer_den and NaN in
         # sigma_central, which the n_bar^2 normalisation then hides in the
         # auto-correlation. Fail loudly instead.
-        if self.MUV_thresh2 < 0 and self.MUV_thresh2 >= self.MUV_thresh1:
+        s = self._model_class._selection_sign
+        if self.thresh2 is not None and not s * (self.thresh2 - self.thresh1) > 0:
+            side = "more negative (brighter)" if s < 0 else "larger (more massive)"
             raise ValueError(
-                f"MUV_thresh2 ({self.MUV_thresh2}) must be more negative than "
-                f"MUV_thresh1 ({self.MUV_thresh1}): thresh1 is the faint limit "
-                "and thresh2 the bright limit of the magnitude bin."
+                f"thresh2 ({self.thresh2}) must be {side} than "
+                f"thresh1 ({self.thresh1}): thresh1 is the outer limit of the "
+                "sample and thresh2 the inner limit of the bin."
             )
 
-        self.eps0 = eps0 if eps0 is not None else DEFAULT_HOD_PARAMS['eps0']
-        self.Mc = Mc if Mc is not None else 10**DEFAULT_HOD_PARAMS['logMc']
-        self.a = a if a is not None else DEFAULT_HOD_PARAMS['a']
-        self.b = b if b is not None else DEFAULT_HOD_PARAMS['b']
-        self.sigma_UV = sigma_UV if sigma_UV is not None else DEFAULT_HOD_PARAMS['sigma_UV']
-        self.Mcut = Mcut if Mcut is not None else 10**DEFAULT_HOD_PARAMS['Mcut']
-        self.Msat = Msat if Msat is not None else 10**DEFAULT_HOD_PARAMS['Msat']
-        self.asat = asat if asat is not None else DEFAULT_HOD_PARAMS['asat']
-        self.add_dust = add_dust if add_dust is not None else DEFAULT_HOD_PARAMS['add_dust']
-        self.M_min = M_min if M_min is not None else self._defaults['M_min']  # Add this
-        
+        self.M_min = M_min if M_min is not None else self._defaults['M_min']
         self.h = h if h is not None else DEFAULT_COSMO_PARAMS['H0'] / 100.0
-        
-        # Create internal HODModel
-        self.hod_model = HODModel(
-            z=self.z, eps0=self.eps0, Mc=self.Mc, a=self.a, b=self.b,
-            sigma_UV=self.sigma_UV, Mcut=self.Mcut, Msat=self.Msat,
-            asat=self.asat, add_dust=self.add_dust
-        )
+
+        model_params.pop('z', None)
+        self.hod_model = self._model_class(z=self.z, **model_params)
+
+    def _occupation(self, N, M):
+        """Occupation ``N`` for the sample, with halomod's M_sun/h masses.
+
+        UNIT CONVERSION: M [M_sun] = M [M_sun/h] / h
+        """
+        M_physical = M / self.h
+        if self.thresh2 is not None:
+            return N(M_physical, self.thresh1) - N(M_physical, self.thresh2)
+        return N(M_physical, self.thresh1)
 
     def _central_occupation(self, M):
-        """Central occupation function for halomod.
-        
-        UNIT CONVERSION: M [M_sun] = M [M_sun/h] / h
-        """
-        M_physical = M / self.h
-        
-        if self.MUV_thresh2 is not None and self.MUV_thresh2 < 0:
-            N_c_bright = self.hod_model.Ncen(M_physical, self.MUV_thresh1)
-            N_c_faint = self.hod_model.Ncen(M_physical, self.MUV_thresh2)
-            return N_c_bright - N_c_faint
-        else:
-            return self.hod_model.Ncen(M_physical, self.MUV_thresh1)
+        """Central occupation function for halomod."""
+        return self._occupation(self.hod_model.Ncen, M)
 
     def _satellite_occupation(self, M):
-        """Satellite occupation function for halomod.
-        
-        UNIT CONVERSION: M [M_sun] = M [M_sun/h] / h
-        """
-        M_physical = M / self.h
-        
-        if self.MUV_thresh2 is not None and self.MUV_thresh2 < 0:
-            N_s_bright = self.hod_model.Nsat(M_physical, self.MUV_thresh1)
-            N_s_faint = self.hod_model.Nsat(M_physical, self.MUV_thresh2)
-            return N_s_bright - N_s_faint
-        else:
-            return self.hod_model.Nsat(M_physical, self.MUV_thresh1)
+        """Satellite occupation function for halomod."""
+        return self._occupation(self.hod_model.Nsat, M)
+
+
+def _halomod_defaults(model_class, thresh1):
+    return {"z": 5.0, "thresh1": thresh1, "thresh2": None, "M_min": 8.0,
+            **{n: None for n in model_class.param_names() if n != 'z'}}
+
+
+class HalomodUVHOD(HalomodHOD):
+    """Halomod wrapper for :class:`UVHODModel` (thresholds in M_UV).
+
+    Examples
+    --------
+    >>> hod = HalomodUVHOD(z=5.0, thresh1=-19.1, h=0.7)
+    """
+
+    _model_class = UVHODModel
+    _defaults = _halomod_defaults(UVHODModel, thresh1=-16.0)
+
+
+class HalomodMstarHOD(HalomodHOD):
+    """Halomod wrapper for :class:`MstarHODModel` (thresholds in log10 Mstar).
+
+    Examples
+    --------
+    >>> hod = HalomodMstarHOD(z=5.0, thresh1=9.0, h=0.7)
+    """
+
+    _model_class = MstarHODModel
+    _defaults = _halomod_defaults(MstarHODModel, thresh1=9.0)
+
+
+UVObservables._halomod_hod_class = HalomodUVHOD
+MstarObservables._halomod_hod_class = HalomodMstarHOD

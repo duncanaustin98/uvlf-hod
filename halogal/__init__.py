@@ -16,8 +16,19 @@ from .__version__ import __version__
 
 # Main model classes (new unified interface)
 from .model import (
+    HMRModel,
     UVHMRModel,
-    HODModel
+    SHMRModel,
+    BaseHODModel,
+    UVHODModel,
+    MstarHODModel,
+    HODModel,
+    Observables,
+    UVObservables,
+    MstarObservables,
+    HalomodHOD,
+    HalomodUVHOD,
+    HalomodMstarHOD,
 )
 
 # Cosmology
@@ -89,9 +100,20 @@ __all__ = [
     'CrossCorrelation',
     
     # Main model classes
+    'HMRModel',
     'UVHMRModel',
+    'SHMRModel',
+    'BaseHODModel',
+    'UVHODModel',
+    'MstarHODModel',
     'HODModel',
-    
+    'Observables',
+    'UVObservables',
+    'MstarObservables',
+    'HalomodHOD',
+    'HalomodUVHOD',
+    'HalomodMstarHOD',
+
     # Cosmology
     'HaloMassFunction',
     'get_halo_mass_function',
