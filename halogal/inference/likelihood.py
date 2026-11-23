@@ -1,0 +1,291 @@
+"""Gaussian likelihood over an arbitrary collection of datasets.
+
+The user composes a :class:`GaussianLikelihood` from whatever
+:class:`~halogal.inference.data.Dataset` objects they want to fit -- any mix of
+UVLF, clustering, and number-density terms, across one or several redshift bins.
+That composition *is* the choice of what data the fit constrains.
+
+For efficiency the likelihood keeps one :class:`~halogal.model.Observables` per
+redshift bin so that the expensive ``halomod`` correlation model is initialised
+once and only *updated* during sampling. These live objects are deliberately
+excluded from pickling (:meth:`__getstate__`): under multiprocessing/MPI each
+worker reconstructs its own, because ``halomod`` state is not safely picklable.
+"""
+
+import warnings
+from collections import OrderedDict, defaultdict
+
+import numpy as np
+
+__all__ = ["GaussianLikelihood"]
+
+
+class GaussianLikelihood:
+    """Total Gaussian log-likelihood for a set of datasets.
+
+    Parameters
+    ----------
+    datasets : list of Dataset
+        The observables to fit. At most one clustering dataset is allowed per
+        redshift bin (a single cached ``halomod`` model serves each bin).
+    parametrization : ModelParametrization
+        Maps a named parameter dict to per-redshift model parameters.
+    catch_errors : bool, optional
+        If True (default), exceptions raised while evaluating a model (e.g. an
+        occasional ``halomod`` failure at extreme parameters) are caught and the
+        likelihood returns ``-inf`` for that point. Set False to surface errors
+        during development.
+    hmf_points : int, optional
+        Number of mass-grid points for the colossus halo mass function used by
+        UVLF / number-density bins **that have no clustering dataset**. The
+        package default is 2048 (set in ``Observables._get_hmf``); the UVLF
+        integral is smooth, so a coarser grid (e.g. 256) is ~2.5x faster with
+        <0.1% change in Phi. Bins that include clustering ignore this and reuse
+        the ``halomod`` HMF (~110 points) instead. Default None keeps 2048.
+    """
+
+    def __init__(self, datasets, parametrization, catch_errors=True,
+                 hmf_points=None):
+        self.datasets = list(datasets)
+        if not self.datasets:
+            raise ValueError("GaussianLikelihood requires at least one Dataset")
+        self.parametrization = parametrization
+        self.catch_errors = catch_errors
+        self.hmf_points = hmf_points
+        self._validate()
+        # Lazily constructed per process; see _ensure_setup / __getstate__.
+        self._bins = None
+        self._warned = False
+
+    def _validate(self):
+        # Labels key the dicts returned by check() / predict_all(); a clash
+        # would silently drop a dataset from those outputs.
+        labels = [d.label for d in self.datasets]
+        dup = sorted({lab for lab in labels if labels.count(lab) > 1})
+        if dup:
+            raise ValueError(
+                f"Dataset labels must be unique; duplicated: {dup}. Pass an "
+                f"explicit label= to each Dataset constructor."
+            )
+        if self.parametrization.mode == "fixed_z" and len(self.redshifts) > 1:
+            warnings.warn(
+                "ModelParametrization mode 'fixed_z' with datasets at "
+                f"several redshifts {self.redshifts}: the same HOD parameters "
+                "are applied to every bin (no redshift evolution). Use "
+                "mode='evolution' to let them evolve.",
+                UserWarning, stacklevel=3,
+            )
+        clustering_per_z = defaultdict(int)
+        for d in self.datasets:
+            if d.kind == "clustering":
+                clustering_per_z[d.z] += 1
+        for z, count in clustering_per_z.items():
+            if count > 1:
+                raise ValueError(
+                    f"At most one clustering dataset per redshift bin "
+                    f"(z={z:g} has {count}); a single halomod model is cached "
+                    f"per bin."
+                )
+
+    @property
+    def redshifts(self):
+        """Sorted unique redshifts spanned by the datasets."""
+        return sorted({d.z for d in self.datasets})
+
+    def _ensure_setup(self):
+        """Build the per-bin Observables (idempotent, per process)."""
+        if self._bins is not None:
+            return
+        from ..model import HODModel, Observables
+
+        bins = OrderedDict()
+        for d in self.datasets:
+            if d.z not in bins:
+                obs = Observables(HODModel(z=d.z))
+                bins[d.z] = {"obs": obs, "datasets": [], "clustering": None}
+            bins[d.z]["datasets"].append(d)
+            if d.kind == "clustering":
+                bins[d.z]["clustering"] = d
+
+        # Initialise each bin's correlation model once (expensive). For bins
+        # without clustering, optionally pre-seed a coarser colossus HMF so the
+        # UVLF integral is not forced onto the dense 2048-point default grid.
+        for z, b in bins.items():
+            d = b["clustering"]
+            if d is not None:
+                init = b["obs"].initialize_correlation_model(
+                    MUV_thresh1=d.MUV_thresh1,
+                    MUV_thresh2=d.MUV_thresh2,
+                    **d.corr_kwargs,
+                )
+                # np.interp would silently clamp data outside the model's
+                # separation grid to the edge value; refuse instead.
+                d.check_separation_range(init["separation"])
+            elif self.hmf_points is not None:
+                from ..cosmology import get_halo_mass_function
+                b["obs"]._hmf_cache[z] = get_halo_mass_function(
+                    z, M_min=6, M_max=15, num_points=self.hmf_points
+                )
+        self._bins = bins
+
+    def _accumulate(self, named_params, reduce_fn):
+        """Shared loop over bins/datasets applying ``reduce_fn(dataset, model)``.
+
+        Returns the summed reductions, or ``-inf`` if any model is non-finite
+        (when reducing log-likelihoods) / on a caught error.
+        """
+        self._ensure_setup()
+        total = 0.0
+        for z, b in self._bins.items():
+            model_params = self.parametrization.params_for_redshift(
+                named_params, z
+            )
+            if not self.parametrization.is_physical(model_params):
+                raise _NonFinite()
+            for d in b["datasets"]:
+                model = d.predict(b["obs"], model_params)
+                total += reduce_fn(d, model)
+        return total
+
+    def log_likelihood(self, named_params):
+        """Total Gaussian log-likelihood for a named parameter dict.
+
+        Parameters
+        ----------
+        named_params : dict
+            Sampling-space parameter values (e.g. from
+            ``ParameterSet.to_dict(theta)``).
+
+        Returns
+        -------
+        float
+            Sum of per-dataset Gaussian log-likelihoods, or ``-inf`` if the
+            per-redshift model parameters are unphysical (e.g. an evolved
+            ``sigma_UV <= 0``), any prediction is non-finite, or (optionally)
+            the model raises.
+        """
+        # One-time setup (incl. the halomod correlation model) is a
+        # configuration step, not per-sample numerical noise: let its errors
+        # propagate even when catch_errors is set, so a misconfigured model
+        # fails fast and visibly instead of returning -inf for every sample.
+        self._ensure_setup()
+
+        def reduce_fn(d, model):
+            ll = d.log_likelihood(model)
+            if not np.isfinite(ll):
+                raise _NonFinite()
+            return ll
+
+        try:
+            return self._accumulate(named_params, reduce_fn)
+        except _NonFinite:
+            return -np.inf
+        except Exception as exc:
+            if self.catch_errors:
+                if not self._warned:
+                    warnings.warn(
+                        "GaussianLikelihood caught an exception during model "
+                        "evaluation and is returning -inf for this point. "
+                        "Further such warnings are suppressed. Use "
+                        "catch_errors=False or .check() to debug. "
+                        f"First error: {exc!r}",
+                        RuntimeWarning, stacklevel=2,
+                    )
+                    self._warned = True
+                return -np.inf
+            raise
+
+    def chi2(self, named_params):
+        """Total generalised chi-square (diagnostic, no normalisation).
+
+        Returns ``inf`` where the per-redshift model parameters are unphysical
+        (see :meth:`ModelParametrization.is_physical`).
+        """
+        try:
+            return self._accumulate(
+                named_params, lambda d, model: d.chi2(model)
+            )
+        except _NonFinite:
+            return np.inf
+
+    @property
+    def ndata(self):
+        """Total number of data points across all datasets."""
+        return int(sum(d.data.size for d in self.datasets))
+
+    def check(self, named_params=None):
+        """Evaluate every dataset once with all errors surfaced.
+
+        Unlike :meth:`log_likelihood`, this ignores ``catch_errors`` and does
+        not mask non-finite values -- exceptions propagate. Use it to validate a
+        setup (e.g. the halomod/clustering configuration) *before* launching a
+        chain, where ``catch_errors`` would otherwise hide failures as ``-inf``.
+
+        Parameters
+        ----------
+        named_params : dict, optional
+            Sampling-space values; defaults to an empty dict, i.e. every
+            parameter taken from the parametrization defaults.
+
+        Returns
+        -------
+        dict
+            ``{label: log_likelihood}`` for each dataset.
+        """
+        self._ensure_setup()
+        named_params = {} if named_params is None else named_params
+        out = {}
+        for z, b in self._bins.items():
+            mp = self.parametrization.params_for_redshift(named_params, z)
+            if not self.parametrization.is_physical(mp):
+                raise ValueError(
+                    f"Unphysical model parameters at z={z:g}: {mp}"
+                )
+            for d in b["datasets"]:
+                out[d.label] = d.log_likelihood(d.predict(b["obs"], mp))
+        return out
+
+    def predict_all(self, named_params):
+        """Model predictions for every dataset, keyed by label.
+
+        Useful for overlaying a best-fit model on the data.
+
+        Returns
+        -------
+        dict
+            ``{label: {"x": abscissa, "data": measured, "model": predicted,
+            "z": redshift, "kind": kind}}``.
+        """
+        self._ensure_setup()
+        out = {}
+        for z, b in self._bins.items():
+            model_params = self.parametrization.params_for_redshift(
+                named_params, z
+            )
+            for d in b["datasets"]:
+                model = d.predict(b["obs"], model_params)
+                out[d.label] = {
+                    "x": d.x,
+                    "data": d.data,
+                    "model": np.asarray(model),
+                    "z": d.z,
+                    "kind": d.kind,
+                }
+        return out
+
+    def __getstate__(self):
+        # Drop the live (unpicklable) Observables so each worker rebuilds them.
+        state = self.__dict__.copy()
+        state["_bins"] = None
+        return state
+
+    def __repr__(self):
+        kinds = ", ".join(sorted({d.kind for d in self.datasets}))
+        return (
+            f"GaussianLikelihood({len(self.datasets)} datasets [{kinds}], "
+            f"z={self.redshifts}, mode='{self.parametrization.mode}')"
+        )
+
+
+class _NonFinite(Exception):
+    """Internal signal that a model produced a non-finite likelihood."""
