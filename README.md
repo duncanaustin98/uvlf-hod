@@ -1,5 +1,7 @@
 # halogal
 
+[![workflow](https://github.com/duncanaustin98/uvlf-hod/actions/workflows/tests.yml/badge.svg)](https://github.com/duncanaustin98/uvlf-hod/actions)
+[![codecov](https://codecov.io/gh/duncanaustin98/uvlf-hod/branch/main/graph/badge.svg)](https://codecov.io/gh/duncanaustin98/uvlf-hod)
 [![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 

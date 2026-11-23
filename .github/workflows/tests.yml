@@ -1,0 +1,90 @@
+name: Tests
+
+# Run the test suite on every PR into main (so it gates the merge) and on the
+# merge commit itself once it lands on main.
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # environment.yml pins python>=3.10,<3.13
+        python-version: ["3.10", "3.11", "3.12"]
+
+    defaults:
+      run:
+        # Login shell so the micromamba environment is activated in each step.
+        shell: bash -el {0}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    # conda-forge provides a prebuilt camb (and numpy<2, which camb needs);
+    # see the notes in environment.yml.
+    - name: Set up micromamba environment
+      uses: mamba-org/setup-micromamba@v2
+      with:
+        environment-file: environment.yml
+        environment-name: halogal
+        create-args: >-
+          python=${{ matrix.python-version }}
+          pytest-cov
+          h5py
+          matplotlib
+        cache-environment: true
+
+    - name: Install halogal
+      run: pip install --no-deps -e .
+
+    - name: Test with pytest
+      run: |
+        # --continue-on-collection-errors: a test module that fails to import
+        # is reported as an error (and fails the job) without stopping the
+        # rest of the suite from running and being counted.
+        pytest --cov=halogal --cov-branch --cov-report=xml --junitxml=junit.xml -o junit_family=legacy --continue-on-collection-errors tests
+
+    # Every test must actually run in CI: a skip (e.g. the halomod
+    # "model construction failed in this env" guard) fails the job.
+    - name: Fail if any test was skipped
+      if: always() && hashFiles('junit.xml') != ''
+      run: |
+        python - <<'EOF'
+        import sys
+        import xml.etree.ElementTree as ET
+
+        skipped = [
+            (f"{tc.get('classname')}::{tc.get('name')}", s.get("message", ""))
+            for tc in ET.parse("junit.xml").getroot().iter("testcase")
+            if (s := tc.find("skipped")) is not None
+        ]
+        for name, msg in skipped:
+            print(f"::error title=Skipped test::{name}: {msg}")
+        print(f"{len(skipped)} skipped test(s)")
+        sys.exit(1 if skipped else 0)
+        EOF
+
+    - name: Upload coverage to Codecov
+      if: always()
+      uses: codecov/codecov-action@v4
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        files: ./coverage.xml
+        flags: unittests
+        fail_ci_if_error: false
+
+    - name: Upload test results to Codecov
+      if: ${{ !cancelled() }}
+      uses: codecov/test-results-action@v1
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}

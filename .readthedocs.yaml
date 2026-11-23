@@ -1,26 +1,24 @@
-# Read the Docs configuration file for halogal
-# See https://docs.readthedocs.io/en/stable/config-file/v2.html for details
+# Read the Docs configuration for halogal
+# https://docs.readthedocs.io/en/stable/config-file/v2.html
+#
+# Read the Docs rebuilds "latest" on every push to main through its GitHub
+# webhook; .github/workflows/docs.yml builds the same docs on every PR (so a
+# broken build is caught before merge) and can also trigger the RTD build.
 
-# Required
 version: 2
 
-# Set the OS, Python version and other tools you might need
 build:
-  os: ubuntu-22.04
+  os: ubuntu-24.04
   tools:
     python: "3.11"
 
-# Build documentation in the "docs/" directory with Sphinx
 sphinx:
   configuration: docs/conf.py
   fail_on_warning: false
 
-# Optionally build your docs in additional formats such as PDF and ePub
 formats:
-  - pdf
   - epub
 
-# Python dependencies required to build your documentation
 python:
   install:
     - requirements: docs/requirements.txt

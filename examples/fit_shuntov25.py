@@ -52,9 +52,9 @@ from bouwens21_data import bouwens21  # noqa: E402
 DATA = REPO / "examples" / "shuntov25_data"
 
 BINS = {
-    "ha-z4.3":   dict(z=4.3, bouwens="z4", muv_thresh=-20.0),
-    "ha-z5.4":   dict(z=5.4, bouwens="z5", muv_thresh=-20.0),
-    "oiii-z7.3": dict(z=7.3, bouwens="z7", muv_thresh=-20.0),
+    "ha-z4.3":   dict(z=4.3, bouwens="z4", muv_thresh=-19.1),
+    "ha-z5.4":   dict(z=5.4, bouwens="z5", muv_thresh=-19.1),
+    "oiii-z7.3": dict(z=7.3, bouwens="z7", muv_thresh=-19.1),
 }
 
 # Forwarded to initialize_correlation_model. On the recommended env (numpy<2)
