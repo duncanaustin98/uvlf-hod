@@ -91,6 +91,7 @@ DEFAULT_HOD_PARAMS = {
     'a': 0.69,           # Low-mass slope (beta in paper)
     'b': 0.65,           # High-mass slope (gamma in paper)
     'sigma_UV': 0.69,    # UV magnitude scatter
+    'sigma_Mstar': 0.3,  # log10 stellar mass scatter (dex); placeholder, not fitted
     'Mcut': 9.57,        # log10(Mcut/Msun) - satellite cutoff
     'Msat': 12.65,       # log10(Msat/Msun) - satellite normalization
     'M_min': 9.0,
