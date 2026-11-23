@@ -86,7 +86,9 @@ Thumbs.db
 # Documentation
 docs/_build/
 docs/_static/
-docs/_templates/
+# Generated at build time by docs/conf.py (notebook copies) and autosummary
+docs/tutorials/
+docs/_autosummary/
 
 # Data files
 *.fits
@@ -104,3 +106,7 @@ docs/_templates/
 .claude/
 examples/tutorial_chains/
 chain*.npz
+
+# Apptainer image and build log (rebuild from container/halogal.def)
+container/*.sif
+container/build.log

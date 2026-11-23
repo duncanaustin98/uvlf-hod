@@ -1,0 +1,59 @@
+Bootstrap: docker
+From: mambaorg/micromamba:1.5.10
+
+# Apptainer/Singularity image for halogal (uvlf-hod) + its inference stack.
+#
+# Build (from the repo root):
+#   apptainer build halogal.sif container/halogal.def
+#
+# Run:
+#   apptainer exec halogal.sif python examples/fit_shuntov25.py --processes 8 ...
+#   apptainer exec halogal.sif python my_fit.py
+#
+# Only uvlf-hod's own requirements are installed: environment.yml plus the
+# [inference] extras from pyproject.toml (h5py, matplotlib).
+
+%files
+    environment.yml /opt/uvlf-hod/environment.yml
+    pyproject.toml  /opt/uvlf-hod/pyproject.toml
+    setup.py        /opt/uvlf-hod/setup.py
+    README.md       /opt/uvlf-hod/README.md
+    LICENSE         /opt/uvlf-hod/LICENSE
+    halogal         /opt/uvlf-hod/halogal
+    examples        /opt/uvlf-hod/examples
+    tests           /opt/uvlf-hod/tests
+
+%post
+    set -e
+    export MAMBA_ROOT_PREFIX=/opt/conda
+    micromamba create -y -p /opt/env -f /opt/uvlf-hod/environment.yml
+    # [inference] extras not listed in environment.yml
+    micromamba install -y -p /opt/env -c conda-forge h5py matplotlib
+    micromamba clean -a -y
+
+    rm -rf /opt/uvlf-hod/halogal/__pycache__ /opt/uvlf-hod/halogal/*/__pycache__ \
+           /opt/uvlf-hod/examples/__pycache__ /opt/uvlf-hod/tests/__pycache__
+    /opt/env/bin/pip install --no-cache-dir --no-deps /opt/uvlf-hod
+
+    # Sanity check at build time
+    cd /tmp && /opt/env/bin/python -c "import halogal, halogal.inference, camb, hmf, halomod, colossus, emcee, dynesty, h5py; print('halogal', halogal.__version__)"
+
+%environment
+    export PATH=/opt/env/bin:$PATH
+    # Image is read-only: send JIT / plotting caches somewhere writable.
+    export NUMBA_CACHE_DIR=${NUMBA_CACHE_DIR:-/tmp/numba_cache}
+    export MPLCONFIGDIR=${MPLCONFIGDIR:-/tmp/mplconfig}
+    export MPLBACKEND=Agg
+    # One BLAS thread per process: parallelism comes from --processes workers.
+    export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
+    export OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-1}
+    export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}
+
+%runscript
+    exec /opt/env/bin/python "$@"
+
+%test
+    cd /tmp && /opt/env/bin/python -c "import halogal.inference"
+
+%labels
+    Description halogal (uvlf-hod) UVLF/HOD modelling + inference

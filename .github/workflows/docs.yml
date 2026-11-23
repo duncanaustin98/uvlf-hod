@@ -1,0 +1,155 @@
+name: Docs
+
+# Builds the Sphinx documentation (tutorial notebooks + API reference from the
+# docstrings) exactly as Read the Docs does, and publishes it to
+# https://uvlf-hod.readthedocs.io.
+#
+#   pull_request -> build with Sphinx so a broken docs build blocks the merge,
+#                   upload the HTML as an artifact, and link the Read the Docs
+#                   PR preview in the PR description.
+#   push to main -> build, then trigger the Read the Docs build of "latest".
+#   manual run   -> build, then trigger the Read the Docs build of any version.
+#
+# One-time setup (repository Settings -> Secrets and variables -> Actions):
+#   * secret   RTD_TOKEN         Read the Docs API token (readthedocs.org ->
+#                                Settings -> API Tokens). Without it the
+#                                publish job is skipped with a notice; RTD's
+#                                own GitHub webhook will still rebuild on push.
+#   * variable RTD_PROJECT_SLUG  optional; defaults to "uvlf-hod".
+# For PR previews also tick "Build pull requests for this project" in the RTD
+# project's Settings.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "halogal/**"
+      - "examples/**"
+      - "notebooks/**"
+      - "CHANGELOG.md"
+      - "pyproject.toml"
+      - ".readthedocs.yaml"
+      - ".github/workflows/docs.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "halogal/**"
+      - "examples/**"
+      - "notebooks/**"
+      - "CHANGELOG.md"
+      - "pyproject.toml"
+      - ".readthedocs.yaml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+    inputs:
+      rtd_version:
+        description: "Read the Docs version to rebuild (e.g. latest, stable, v0.2.0)"
+        required: false
+        default: latest
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RTD_PROJECT_SLUG: ${{ vars.RTD_PROJECT_SLUG || 'uvlf-hod' }}
+
+jobs:
+  build:
+    name: Build docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same interpreter and install method as .readthedocs.yaml, so a green
+      # build here means a green build on Read the Docs.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            docs/requirements.txt
+            pyproject.toml
+
+      - name: Install halogal and docs requirements
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r docs/requirements.txt .
+
+      # -W: any Sphinx warning (bad docstring markup, missing notebook,
+      # broken cross-reference) fails the job; --keep-going reports them all.
+      - name: Build HTML
+        run: |
+          python -m sphinx -b html -W --keep-going -w sphinx-warnings.log \
+            docs docs/_build/html
+
+      - name: Summarise warnings
+        if: always()
+        run: |
+          {
+            echo "### Sphinx build"
+            if [ -s sphinx-warnings.log ]; then
+              echo "$(wc -l < sphinx-warnings.log) warning line(s):"
+              echo '```'
+              head -n 100 sphinx-warnings.log
+              echo '```'
+            else
+              echo "No warnings."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload HTML
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-html
+          path: docs/_build/html
+          retention-days: 14
+
+  pr-preview:
+    name: Link Read the Docs preview
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: readthedocs/actions/preview@v1
+        with:
+          project-slug: ${{ env.RTD_PROJECT_SLUG }}
+
+  publish:
+    name: Publish to Read the Docs
+    needs: build
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Read the Docs build
+        env:
+          RTD_TOKEN: ${{ secrets.RTD_TOKEN }}
+          RTD_VERSION: ${{ inputs.rtd_version || 'latest' }}
+        run: |
+          if [ -z "$RTD_TOKEN" ]; then
+            echo "::notice::RTD_TOKEN secret not set; skipping the API trigger (Read the Docs' GitHub webhook still rebuilds on push)."
+            exit 0
+          fi
+          url="https://readthedocs.org/api/v3/projects/${RTD_PROJECT_SLUG}/versions/${RTD_VERSION}/builds/"
+          echo "POST $url"
+          status=$(curl -sS -o response.json -w '%{http_code}' -X POST \
+            -H "Authorization: Token ${RTD_TOKEN}" "$url")
+          cat response.json; echo
+          if [ "$status" -ge 300 ]; then
+            echo "::error::Read the Docs returned HTTP $status"
+            exit 1
+          fi
+          {
+            echo "### Read the Docs"
+            echo "Triggered build of \`${RTD_VERSION}\` for \`${RTD_PROJECT_SLUG}\`."
+            echo "Docs: https://${RTD_PROJECT_SLUG}.readthedocs.io/en/${RTD_VERSION}/"
+          } >> "$GITHUB_STEP_SUMMARY"
