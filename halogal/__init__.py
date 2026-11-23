@@ -19,9 +19,14 @@ from .model import (
     HMRModel,
     UVHMRModel,
     SHMRModel,
+    HMRModel_FFB,
+    UVHMRModel_FFB,
+    SHMRModel_FFB,
     BaseHODModel,
     UVHODModel,
     MstarHODModel,
+    UVHODModel_FFB,
+    MstarHODModel_FFB,
     HODModel,
     Observables,
     UVObservables,
@@ -29,6 +34,8 @@ from .model import (
     HalomodHOD,
     HalomodUVHOD,
     HalomodMstarHOD,
+    HalomodUVHOD_FFB,
+    HalomodMstarHOD_FFB,
 )
 
 # Cosmology
@@ -103,9 +110,14 @@ __all__ = [
     'HMRModel',
     'UVHMRModel',
     'SHMRModel',
+    'HMRModel_FFB',
+    'UVHMRModel_FFB',
+    'SHMRModel_FFB',
     'BaseHODModel',
     'UVHODModel',
     'MstarHODModel',
+    'UVHODModel_FFB',
+    'MstarHODModel_FFB',
     'HODModel',
     'Observables',
     'UVObservables',
@@ -113,6 +125,8 @@ __all__ = [
     'HalomodHOD',
     'HalomodUVHOD',
     'HalomodMstarHOD',
+    'HalomodUVHOD_FFB',
+    'HalomodMstarHOD_FFB',
 
     # Cosmology
     'HaloMassFunction',

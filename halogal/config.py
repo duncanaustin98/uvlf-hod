@@ -4,7 +4,7 @@ from astropy.cosmology import FlatLambdaCDM
 from colossus.cosmology import cosmology
 
 # Physical constants
-BARYON_FRACTION = 0.16
+BARYON_FRACTION = 0.176
 
 # ---------------------------------------------------------------------------
 # Cosmology: ONE source of truth
@@ -97,6 +97,8 @@ DEFAULT_HOD_PARAMS = {
     'M_min': 9.0,
     'asat': 0.85,        # Satellite power-law slope (alpha_sat in paper)
     'add_dust': True,
+    'ffb_delta': 0.15,   # Scatter about halo mass limit for FFB switch-on
+    'eps_max_ffb': 1.0,  # Star formation efficiency in the FFB phase
 }
 
 # Redshift evolution parameters (linear parametrization)

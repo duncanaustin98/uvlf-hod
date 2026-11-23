@@ -65,7 +65,14 @@ class HMRModel(ABC):
         """Names of all parameters accepted by :meth:`update_parameters`."""
         return cls._PARAM_NAMES
 
-    def __init__(self, z, eps0=None, Mc=None, a=None, b=None):
+    def __init__(
+        self,
+        z,
+        eps0=None,
+        Mc=None,
+        a=None,
+        b=None,
+    ):
         """Initialize UV/Mstar HMR model."""
         from .config import DEFAULT_HOD_PARAMS
         
@@ -74,6 +81,7 @@ class HMRModel(ABC):
         self.Mc = Mc if Mc is not None else 10**DEFAULT_HOD_PARAMS['logMc']
         self.a = a if a is not None else DEFAULT_HOD_PARAMS['a']
         self.b = b if b is not None else DEFAULT_HOD_PARAMS['b']
+
 
     @abstractmethod
     def __call__(self, Mh):
@@ -139,7 +147,7 @@ class HMRModel(ABC):
         Parameters
         ----------
         **kwargs : dict
-            Parameters to update: z, eps0, Mc, a, b, add_dust
+            Parameters to update: z, eps0, Mc, a, b
         """
         if 'z' in kwargs:
             self.z = kwargs['z']
@@ -151,6 +159,178 @@ class HMRModel(ABC):
             self.a = kwargs['a']
         if 'b' in kwargs:
             self.b = kwargs['b']
+
+
+class HMRModel_FFB(HMRModel):
+    """Halo Mass Relation model with feedback-free starbursts (FFBs).
+
+    Extends :class:`HMRModel` with the feedback-free starburst scenario of
+    Dekel et al. (2023) and Li et al. (2024). In haloes above a
+    redshift-dependent threshold mass :attr:`M_ffb`, star formation proceeds
+    before stellar feedback can act, so the star formation efficiency is
+    enhanced. The fraction of haloes in the FFB phase, :meth:`ffb_fraction`,
+    switches on smoothly above ``M_ffb`` and off again above ``Mc``. Each
+    transition is a sigmoid in log10(Mh) of width ``ffb_delta`` dex.
+
+    Parameters
+    ----------
+    z : float
+        Redshift
+    eps0 : float, optional
+        Star formation efficiency normalization. Default from config.
+    Mc : float, optional
+        Characteristic halo mass in M_sun. Also sets the upper mass limit of
+        the FFB phase. Default from config.
+    a : float, optional
+        Low-mass power-law slope. Default from config.
+    b : float, optional
+        High-mass power-law slope. Default from config.
+    ffb_delta : float, optional
+        Width, in dex of halo mass, of the sigmoid transitions into and out
+        of the FFB phase. Default from config.
+    eps_max_ffb : float, optional
+        Star formation efficiency of haloes in the FFB phase. The SFE tends
+        to this value where ``ffb_fraction`` -> 1. Li et al. (2024) consider
+        values from about 0.2 up to 1. Default from config.
+
+    Attributes
+    ----------
+    z, eps0, Mc, a, b : float
+        HMR parameters
+    ffb_delta : float
+        FFB transition width in dex
+    eps_max_ffb : float
+        Star formation efficiency in the FFB phase
+    M_ffb : float
+        FFB threshold halo mass in M_sun at redshift ``z`` (read-only)
+
+    Examples
+    --------
+    >>> model = HMRModel_FFB(z=10.0, ffb_delta=0.15)
+    >>> Mh = np.logspace(9, 13, 100)
+    >>> f_ffb = model.ffb_fraction(Mh)
+    """
+
+    #: FFB parameters, appended to the parent's names by :meth:`param_names`.
+    _FFB_PARAMS = ('ffb_delta', 'eps_max_ffb')
+
+    @classmethod
+    def param_names(cls):
+        """Names of all parameters accepted by :meth:`update_parameters`."""
+        return super().param_names() + cls._FFB_PARAMS
+
+    def __init__(
+        self,
+        z,
+        eps0=None,
+        Mc=None,
+        a=None,
+        b=None,
+        ffb_delta=None,
+        eps_max_ffb=None,
+        **kwargs,
+    ):
+        """Initialize HMR model with feedback-free starbursts."""
+        from .config import DEFAULT_HOD_PARAMS
+        self.ffb_delta = ffb_delta if ffb_delta is not None else DEFAULT_HOD_PARAMS['ffb_delta']
+        self.eps_max_ffb = eps_max_ffb if eps_max_ffb is not None else DEFAULT_HOD_PARAMS['eps_max_ffb']
+        super().__init__(z, eps0=eps0, Mc=Mc, a=a, b=b, **kwargs)
+
+    def _settings(self):
+        return {**super()._settings(),
+                'ffb_delta': self.ffb_delta, 'eps_max_ffb': self.eps_max_ffb}
+
+    @property
+    def M_ffb(self):
+        """FFB threshold halo mass at the model redshift.
+
+        Haloes above this mass are expected to host feedback-free starbursts
+        (Li et al. 2024)::
+
+            M_ffb(z) = 10^10.8 M_sun * ((1 + z) / 10)^-6.2
+
+        The threshold falls steeply with redshift: about 10^10.5 M_sun at
+        z = 10 and about 10^11.8 M_sun at z = 6. It is recomputed from the
+        current ``z`` on every access, so it follows ``update_parameters(z=...)``.
+
+        Returns
+        -------
+        M_ffb : float
+            Threshold halo mass in M_sun
+        """
+        return 10**10.8 * ((1 + self.z) / 10)**-6.2
+
+    def ffb_fraction(self, Mh):
+        """Fraction of haloes of mass Mh in the feedback-free starburst phase.
+
+        The product of two sigmoids in log10(Mh), each of width ``ffb_delta``:
+        one switching FFBs on above :attr:`M_ffb` and one switching them off
+        above ``Mc``::
+
+            f_ffb = S((log Mh - log M_ffb) / ffb_delta)
+                    * S((log Mc - log Mh) / ffb_delta)
+
+        where S(x) = 1 / (1 + e^-x). S is evaluated as 0.5 * (1 + tanh(x/2)),
+        which is identical but does not overflow for large negative x.
+
+        f_ffb only approaches 1 when the window between ``M_ffb`` and ``Mc``
+        is several ``ffb_delta`` wide. When ``M_ffb`` > ``Mc`` (z below about
+        6.3 for the default ``Mc``) the window closes and f_ffb stays small at
+        all masses.
+
+        Parameters
+        ----------
+        Mh : float or array_like
+            Halo mass in M_sun
+
+        Returns
+        -------
+        f_ffb : ndarray
+            FFB fraction, between 0 and 1
+        """
+        logMh = np.log10(np.atleast_1d(Mh))
+        ffb_turnon = (logMh - np.log10(self.M_ffb)) / self.ffb_delta
+        sigmoid_ffb_turnon = 0.5 * (1 + np.tanh(ffb_turnon / 2))
+        ffb_turnoff = (np.log10(self.Mc) - logMh) / self.ffb_delta
+        sigmoid_ffb_turnoff = 0.5 * (1 + np.tanh(ffb_turnoff / 2))
+        return sigmoid_ffb_turnon * sigmoid_ffb_turnoff
+
+    def star_formation_efficiency(self, Mh):
+        """Compute star formation efficiency, including FFBs.
+
+        Blends the double power-law SFE of :class:`HMRModel` with the FFB
+        efficiency, weighted by the FFB fraction::
+
+            eps = (1 - f_ffb) * eps_std + f_ffb * eps_max_ffb
+
+        Parameters
+        ----------
+        Mh : float or array_like
+            Halo mass in M_sun
+
+        Returns
+        -------
+        epsilon : ndarray
+            Star formation efficiency
+        """
+        Mh = np.atleast_1d(Mh)
+        base_sfe = super().star_formation_efficiency(Mh)
+        ffb_frac = self.ffb_fraction(Mh)
+        return (1 - ffb_frac) * base_sfe + ffb_frac * self.eps_max_ffb
+
+    def update_parameters(self, **kwargs):
+        """Update model parameters.
+
+        Parameters
+        ----------
+        **kwargs : dict
+            Parameters to update: z, eps0, Mc, a, b, ffb_delta, eps_max_ffb
+        """
+        if 'ffb_delta' in kwargs:
+            self.ffb_delta = kwargs['ffb_delta']
+        if 'eps_max_ffb' in kwargs:
+            self.eps_max_ffb = kwargs['eps_max_ffb']
+        super().update_parameters(**kwargs)
 
 
 class UVHMRModel(HMRModel):
@@ -193,10 +373,11 @@ class UVHMRModel(HMRModel):
     
     _PARAM_NAMES = HMRModel._PARAM_NAMES + ('add_dust',)
 
-    def __init__(self, z, eps0=None, Mc=None, a=None, b=None, add_dust=True):
+    def __init__(self, z, eps0=None, Mc=None, a=None, b=None, add_dust=True,
+                 **kwargs):
         """Initialize UVHMR model."""
         self.add_dust = add_dust
-        super().__init__(z, eps0=eps0, Mc=Mc, a=a, b=b)
+        super().__init__(z, eps0=eps0, Mc=Mc, a=a, b=b, **kwargs)
     
     def halo_accretion_rate(self, Mh):
         """Compute halo mass accretion rate.
@@ -276,7 +457,7 @@ class UVHMRModel(HMRModel):
         return self.property(Mh)
 
     def _settings(self):
-        return {'add_dust': self.add_dust}
+        return {**super()._settings(), 'add_dust': self.add_dust}
 
     def update_parameters(self, **kwargs):
         """Update model parameters.
@@ -372,6 +553,37 @@ class SHMRModel(HMRModel):
         return self(Mh)
 
 
+class UVHMRModel_FFB(UVHMRModel, HMRModel_FFB):
+    """:class:`UVHMRModel` with feedback-free starbursts.
+
+    Takes the :class:`UVHMRModel` parameters plus ``ffb_delta`` and
+    ``eps_max_ffb`` (see :class:`HMRModel_FFB`). The parent order puts
+    :class:`HMRModel_FFB` between :class:`UVHMRModel` and :class:`HMRModel`
+    in the MRO, so every UV method uses the FFB star formation efficiency.
+
+    Examples
+    --------
+    >>> model = UVHMRModel_FFB(z=10.0, eps_max_ffb=0.5)
+    >>> MUV = model.MUV(np.logspace(10, 12, 50))
+    """
+
+
+class SHMRModel_FFB(SHMRModel, HMRModel_FFB):
+    """:class:`SHMRModel` with feedback-free starbursts.
+
+    Takes the :class:`SHMRModel` parameters plus ``ffb_delta`` and
+    ``eps_max_ffb`` (see :class:`HMRModel_FFB`). The parent order puts
+    :class:`HMRModel_FFB` between :class:`SHMRModel` and :class:`HMRModel`
+    in the MRO, so every stellar-mass method uses the FFB star formation
+    efficiency.
+
+    Examples
+    --------
+    >>> model = SHMRModel_FFB(z=10.0, eps_max_ffb=0.5)
+    >>> Mstar = model.Mstar(np.logspace(10, 12, 50))
+    """
+
+
 class BaseHODModel(HMRModel):
     """Shared Halo Occupation Distribution machinery.
 
@@ -422,7 +634,7 @@ class BaseHODModel(HMRModel):
     _selection_sign = None
 
     def __init__(self, z, eps0=None, Mc=None, a=None, b=None,
-                 sigma=None, Mcut=None, Msat=None, asat=None, **kwargs):
+        sigma=None, Mcut=None, Msat=None, asat=None, **kwargs):
         from .config import DEFAULT_HOD_PARAMS
 
         super().__init__(z, eps0=eps0, Mc=Mc, a=a, b=b, **kwargs)
@@ -605,9 +817,9 @@ class UVHODModel(BaseHODModel, UVHMRModel):
 
     def __init__(self, z, eps0=None, Mc=None, a=None, b=None,
                  sigma_UV=None, Mcut=None, Msat=None, asat=None,
-                 add_dust=True):
+                 add_dust=True, **kwargs):
         super().__init__(z, eps0, Mc, a, b, sigma_UV, Mcut, Msat, asat,
-                         add_dust=add_dust)
+                         add_dust=add_dust, **kwargs)
 
     def _selection_variable(self, Mh):
         return self.MUV(Mh)
@@ -648,11 +860,47 @@ class MstarHODModel(BaseHODModel, SHMRModel):
     _selection_sign = +1    # log10(Mstar) > thresh (more massive than)
 
     def __init__(self, z, eps0=None, Mc=None, a=None, b=None,
-                 sigma_Mstar=None, Mcut=None, Msat=None, asat=None):
-        super().__init__(z, eps0, Mc, a, b, sigma_Mstar, Mcut, Msat, asat)
+                 sigma_Mstar=None, Mcut=None, Msat=None, asat=None, **kwargs):
+        super().__init__(z, eps0, Mc, a, b, sigma_Mstar, Mcut, Msat, asat,
+                         **kwargs)
 
     def _selection_variable(self, Mh):
         return np.log10(self.Mstar(Mh))
+
+
+class UVHODModel_FFB(UVHODModel, HMRModel_FFB):
+    """:class:`UVHODModel` with feedback-free starbursts.
+
+    Takes the :class:`UVHODModel` parameters plus ``ffb_delta`` and
+    ``eps_max_ffb`` (see :class:`HMRModel_FFB`). The MRO is
+    ``UVHODModel_FFB -> UVHODModel -> BaseHODModel -> UVHMRModel ->
+    HMRModel_FFB -> HMRModel``, so M_UV, and hence N_cen and N_sat, use the
+    FFB star formation efficiency. It is still a :class:`UVHODModel`, so
+    ``Observables(model)`` returns a :class:`UVObservables`.
+
+    Examples
+    --------
+    >>> model = UVHODModel_FFB(z=10.0, sigma_UV=0.5, eps_max_ffb=0.5)
+    >>> obs = Observables(model)
+    >>> phi = obs.luminosity_function(np.linspace(-22, -16, 13))
+    """
+
+
+class MstarHODModel_FFB(MstarHODModel, HMRModel_FFB):
+    """:class:`MstarHODModel` with feedback-free starbursts.
+
+    Takes the :class:`MstarHODModel` parameters plus ``ffb_delta`` and
+    ``eps_max_ffb`` (see :class:`HMRModel_FFB`). The MRO is
+    ``MstarHODModel_FFB -> MstarHODModel -> BaseHODModel -> SHMRModel ->
+    HMRModel_FFB -> HMRModel``, so Mstar, and hence N_cen and N_sat, use the
+    FFB star formation efficiency. It is still a :class:`MstarHODModel`, so
+    ``Observables(model)`` returns a :class:`MstarObservables`.
+
+    Examples
+    --------
+    >>> model = MstarHODModel_FFB(z=10.0, eps_max_ffb=0.5)
+    >>> N_cen = model.Ncen(np.logspace(10, 13, 50), 9.0)
+    """
 
 
 # Backward-compatible alias: HODModel has always meant the UV-selected model.
@@ -719,6 +967,8 @@ class Observables:
     _model_class = None
     #: Halomod HOD wrapper used for correlation functions (set by subclasses).
     _halomod_hod_class = None
+    #: Halomod HOD wrapper used when the model includes FFBs (set by subclasses).
+    _halomod_hod_class_ffb = None
 
     def __new__(cls, hod_model=None, *args, **kwargs):
         # Observables(model) dispatches on the model type. hod_model defaults
@@ -995,6 +1245,16 @@ class Observables:
     # ------------------------------------------------------------------
     # Correlation functions (halomod)
     # ------------------------------------------------------------------
+    def _halomod_wrapper_class(self):
+        """Halomod HOD wrapper matching the model, with or without FFBs.
+
+        The wrapper rebuilds its own HOD model from ``hod_params``, so an FFB
+        model needs the FFB wrapper or the FFB physics would be lost.
+        """
+        if isinstance(self.hod_model, HMRModel_FFB):
+            return self._halomod_hod_class_ffb
+        return self._halomod_hod_class
+
     def _halomod_hod_params(self):
         """Current HOD parameters in the form the halomod wrapper expects."""
         cfg = self._halomod_config
@@ -1134,7 +1394,7 @@ class Observables:
             'exclusion_model': exclusion_model,
             'bias_model': bias_model,
             'sd_bias_model': sd_bias_model,
-            'hod_model' : self._halomod_hod_class,
+            'hod_model' : self._halomod_wrapper_class(),
             'hod_params' : self._halomod_hod_params(),
         }
 
@@ -1304,21 +1564,21 @@ class UVObservables(Observables):
         """
         return self.abundance_function(MUV_arr, dMUV, **params)
 
-    def galaxy_bias(self, MUV_arr, dMUV=0.05, **params):
-        """Galaxy bias in UV magnitude bins of width ``dMUV``."""
-        return super().galaxy_bias(MUV_arr, dMUV, **params)
+    # def galaxy_bias(self, MUV_arr, dMUV=0.05, **params):
+    #     """Galaxy bias in UV magnitude bins of width ``dMUV``."""
+    #     return super().galaxy_bias(MUV_arr, dMUV, **params)
 
-    def mean_halo_mass(self, MUV_thresh, **params):
-        """log10 mean halo mass of galaxies brighter than ``MUV_thresh``."""
-        return super().mean_halo_mass(MUV_thresh, **params)
+    # def mean_halo_mass(self, MUV_thresh, **params):
+    #     """log10 mean halo mass of galaxies brighter than ``MUV_thresh``."""
+    #     return super().mean_halo_mass(MUV_thresh, **params)
 
-    def mean_bias(self, MUV_thresh, **params):
-        """Mean galaxy bias of galaxies brighter than ``MUV_thresh``."""
-        return super().mean_bias(MUV_thresh, **params)
+    # def mean_bias(self, MUV_thresh, **params):
+    #     """Mean galaxy bias of galaxies brighter than ``MUV_thresh``."""
+    #     return super().mean_bias(MUV_thresh, **params)
 
-    def number_density(self, MUV_thresh, **params):
-        """Number density (Mpc^-3) of galaxies brighter than ``MUV_thresh``."""
-        return super().number_density(MUV_thresh, **params)
+    # def number_density(self, MUV_thresh, **params):
+    #     """Number density (Mpc^-3) of galaxies brighter than ``MUV_thresh``."""
+    #     return super().number_density(MUV_thresh, **params)
 
     def initialize_correlation_model(self, MUV_thresh1, MUV_thresh2=0, **kwargs):
         """Initialize the halomod correlation model for a UV sample.
@@ -1504,5 +1764,21 @@ class HalomodMstarHOD(HalomodHOD):
     _defaults = _halomod_defaults(MstarHODModel, thresh1=9.0)
 
 
+class HalomodUVHOD_FFB(HalomodUVHOD):
+    """Halomod wrapper for :class:`UVHODModel_FFB` (thresholds in M_UV)."""
+
+    _model_class = UVHODModel_FFB
+    _defaults = _halomod_defaults(UVHODModel_FFB, thresh1=-16.0)
+
+
+class HalomodMstarHOD_FFB(HalomodMstarHOD):
+    """Halomod wrapper for :class:`MstarHODModel_FFB` (thresholds in log10 Mstar)."""
+
+    _model_class = MstarHODModel_FFB
+    _defaults = _halomod_defaults(MstarHODModel_FFB, thresh1=9.0)
+
+
 UVObservables._halomod_hod_class = HalomodUVHOD
 MstarObservables._halomod_hod_class = HalomodMstarHOD
+UVObservables._halomod_hod_class_ffb = HalomodUVHOD_FFB
+MstarObservables._halomod_hod_class_ffb = HalomodMstarHOD_FFB
