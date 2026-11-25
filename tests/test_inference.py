@@ -159,6 +159,40 @@ class TestParametrization:
         assert np.log10(out["Mc"]) == pytest.approx(11.616, abs=1e-3)
         assert out["b"] == pytest.approx(0.646, abs=1e-3)
 
+    def test_powerlaw_pivot_and_exponent(self):
+        # A(z) = A_0 ((1+z)/(1+z_pivot))^A_1; masses: log10 M likewise.
+        ps = ParameterSet([
+            Parameter("eps0_0", Uniform(0, 1)), Parameter("eps0_1", Uniform(-5, 5)),
+            Parameter("logMc_0", Uniform(10, 13)),
+            Parameter("logMc_1", Uniform(-5, 5))])
+        mp = ModelParametrization("powerlaw", ps, z_pivot=7.0)
+        named = ps.to_dict([0.1, -2.0, 11.5, 1.5])
+        at_pivot = mp.params_for_redshift(named, 7.0)
+        assert at_pivot["eps0"] == pytest.approx(0.1)
+        assert np.log10(at_pivot["Mc"]) == pytest.approx(11.5)
+        out = mp.params_for_redshift(named, 11.0)
+        assert out["eps0"] == pytest.approx(0.1 * 1.5 ** -2.0)
+        assert out["Mc"] == pytest.approx(10 ** 11.5 * 1.5 ** 1.5)
+
+    def test_powerlaw_falls_back_to_linear(self):
+        # Parameters without power-law coefficients follow the linear law:
+        # the published evolution, or given (slope, offset) coefficients.
+        ps = ParameterSet([
+            Parameter("eps0_0", Uniform(0, 1)), Parameter("eps0_1", Uniform(-5, 5)),
+            Parameter("d_a_dz", fixed=True, value=0.0),
+            Parameter("C_a", fixed=True, value=0.8)])
+        mp = ModelParametrization("powerlaw", ps, z_pivot=7.0)
+        out = mp.params_for_redshift(ps.to_dict([0.1, 0.0]), 9.0)
+        lin = ModelParametrization("evolution").params_for_redshift({}, 9.0)
+        assert out["a"] == pytest.approx(0.8)
+        assert out["b"] == pytest.approx(lin["b"])
+        assert out["Mc"] == pytest.approx(lin["Mc"])
+
+    def test_powerlaw_needs_both_coefficients(self):
+        with pytest.raises(ValueError, match="needs both"):
+            ModelParametrization(
+                "powerlaw", ParameterSet([Parameter("eps0_0", Uniform(0, 1))]))
+
     def test_unknown_name_rejected(self):
         with pytest.raises(ValueError):
             ModelParametrization(

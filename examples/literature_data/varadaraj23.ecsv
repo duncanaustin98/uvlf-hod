@@ -1,0 +1,22 @@
+# %ECSV 1.0
+# ---
+# datatype:
+# - {name: z, datatype: float64}
+# - {name: M, unit: mag, datatype: float64}
+# - {name: phi, unit: 1 / (mag Mpc3), datatype: float64}
+# - {name: phi_err_upp, unit: 1 / (mag Mpc3), datatype: float64}
+# - {name: phi_err_low, unit: 1 / (mag Mpc3), datatype: float64}
+# - {name: deltaM, unit: mag, datatype: float64}
+# meta: !!omap
+# - {x: M}
+# - {y: phi}
+# - {name: Varadaraj et al. 2023}
+# - {type: binned}
+# - redshifts: [7.0]
+# - observatory: [VISTA]
+# - references: [2023MNRAS.524.4586V]
+# schema: astropy-2.0
+z M phi phi_err_upp phi_err_low deltaM
+7 -23.675 2.37e-08 2.50e-08 2.50e-08 0.75
+7 -22.925 2.81e-07 1.54e-07 1.54e-07 0.75
+7 -22.175 2.70e-06 6.60e-07 6.60e-07 0.75

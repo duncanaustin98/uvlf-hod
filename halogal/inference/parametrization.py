@@ -8,7 +8,7 @@ likelihood. Given the named parameter dictionary produced by a
 (``eps0, Mc, a, b, sigma_UV, Mcut, Msat, asat`` with *linear* masses in
 M_sun).
 
-Two modes:
+Three modes:
 
 ``"fixed_z"``
     The sampled quantities *are* the HOD parameters at a single redshift.
@@ -21,6 +21,19 @@ Two modes:
     engine underlying the package's ``*_fz`` helpers. Coefficient names match
     :data:`halogal.config.DEFAULT_REDSHIFT_EVOLUTION` so fits can be compared to
     the published values directly. The mass coefficients act in ``log10`` space.
+
+``"powerlaw"``
+    Power-law redshift evolution normalised at a pivot redshift ``z_pivot``,
+    ``A(z) = A_0 * ((1 + z) / (1 + z_pivot))**A_1``. The coefficients are
+    named ``<x>_0`` (the value at ``z_pivot``) and ``<x>_1`` (the exponent),
+    with ``<x>`` the fixed-z sampling name: ``eps0_0``, ``eps0_1``, ...,
+    ``logMc_0``, ``logMc_1``. For masses ``logM_0`` is ``log10 M`` at the pivot
+    and ``logM_1`` the exponent of ``M``, i.e.
+    ``log10 M(z) = logM_0 + logM_1 * log10((1 + z) / (1 + z_pivot))``.
+    A parameter with neither coefficient follows the linear law of
+    ``"evolution"`` mode (``d_<x>_dz``, ``C_<x>``; by default the published
+    values), so some parameters can evolve as power laws while the rest track
+    the published evolution or, with a zero slope, stay constant.
 
 The ``log10`` -> linear mass conversion lives **only** here, at the boundary
 before the model is called.
@@ -36,6 +49,7 @@ __all__ = [
     "MODEL_PARAM_NAMES",
     "fixed_z_param_names",
     "evolution_param_names",
+    "powerlaw_param_names",
     "default_fixed_z_values",
     "default_evolution_values",
     "ModelParametrization",
@@ -77,6 +91,20 @@ def evolution_param_names():
     return names
 
 
+def powerlaw_param_names():
+    """Sampling-space names for ``powerlaw`` mode: ``<x>_0`` (value at the
+    pivot redshift) and ``<x>_1`` (exponent of ``1 + z``) per HOD parameter,
+    with ``<x>`` the fixed-z sampling name (16 coefficients)."""
+    names = []
+    for _, sample_name, _, _, _ in HOD_PARAM_SPEC:
+        names.extend(_powerlaw_names(sample_name))
+    return names
+
+
+def _powerlaw_names(sample_name):
+    return f"{sample_name}_0", f"{sample_name}_1"
+
+
 def default_fixed_z_values():
     """Published fixed-z parameter defaults (from ``DEFAULT_HOD_PARAMS``).
 
@@ -107,34 +135,45 @@ class ModelParametrization:
 
     Parameters
     ----------
-    mode : {"fixed_z", "evolution"}
+    mode : {"fixed_z", "evolution", "powerlaw"}
         Redshift handling. ``"fixed_z"`` samples HOD parameters directly at one
         redshift; ``"evolution"`` samples the linear evolution coefficients and
-        evaluates per-bin parameters.
+        evaluates per-bin parameters; ``"powerlaw"`` evolves each parameter
+        with power-law coefficients ``<x>_0``, ``<x>_1`` as
+        ``A_0 * ((1 + z) / (1 + z_pivot))**A_1``, falling back to the linear
+        law for parameters without them.
     parameter_set : ParameterSet, optional
         If supplied, its parameter names are validated against the names
         recognised by ``mode`` (typos are rejected).
     use_linear : bool, optional
         Evolution scheme passed to :class:`RedshiftParametrization`:
         ``param(z) = slope * z + offset`` (default) or the ``z / (1 + z)``
-        normalised form. Only relevant in ``"evolution"`` mode.
+        normalised form. Used in ``"evolution"`` mode, and in ``"powerlaw"``
+        mode for the parameters that follow the linear law.
     defaults : dict, optional
         Sampling-space values used to fill any parameter the ``ParameterSet``
         does not specify. Defaults to the published values
         (:func:`default_fixed_z_values` / :func:`default_evolution_values`), so
         a user may vary only a subset of parameters and leave the rest at their
-        fiducial values. Pass an explicit dict to override.
+        fiducial values. Pass an explicit dict to override. In ``"powerlaw"``
+        mode the default is the published linear coefficients, so a parameter
+        without power-law coefficients follows the published evolution.
+    z_pivot : float, optional
+        Pivot redshift of ``"powerlaw"`` mode, where ``A = A_0``. Default 0,
+        i.e. ``A_0 * (1 + z)**A_1``.
     """
 
-    _VALID_MODES = ("fixed_z", "evolution")
+    _VALID_MODES = ("fixed_z", "evolution", "powerlaw")
 
-    def __init__(self, mode, parameter_set=None, use_linear=True, defaults=None):
+    def __init__(self, mode, parameter_set=None, use_linear=True, defaults=None,
+                 z_pivot=0.0):
         if mode not in self._VALID_MODES:
             raise ValueError(
                 f"mode must be one of {self._VALID_MODES}, got {mode!r}"
             )
         self.mode = mode
         self.use_linear = use_linear
+        self.z_pivot = float(z_pivot)
         self._evolution = RedshiftParametrization(use_linear=use_linear)
         if defaults is None:
             defaults = (
@@ -149,7 +188,23 @@ class ModelParametrization:
         """All sampling-space names recognised for the chosen mode."""
         if self.mode == "fixed_z":
             return fixed_z_param_names()
+        if self.mode == "powerlaw":
+            return powerlaw_param_names() + evolution_param_names()
         return evolution_param_names()
+
+    def _uses_powerlaw(self, sample_name, available):
+        """Whether a parameter follows the power law (``powerlaw`` mode):
+        both of its coefficients are in ``available`` (names or a dict) or
+        ``defaults``. Exactly one is an error: the law would be undefined."""
+        has = [n in available or n in self.defaults
+               for n in _powerlaw_names(sample_name)]
+        if all(has):
+            return True
+        if any(has):
+            raise ValueError(
+                f"Power-law evolution of '{sample_name}' needs both "
+                f"{' and '.join(_powerlaw_names(sample_name))}")
+        return False
 
     def validate(self, parameter_set):
         """Reject unknown parameter names and unresolvable required names.
@@ -168,8 +223,15 @@ class ModelParametrization:
                 f"{unknown}. Valid names: {sorted(recognised)}"
             )
         provided = {p.name for p in parameter_set.parameters}
+        if self.mode == "powerlaw":
+            needed = []
+            for _, sample_name, _, slope_name, offset_name in HOD_PARAM_SPEC:
+                if not self._uses_powerlaw(sample_name, provided):
+                    needed += [slope_name, offset_name]
+        else:
+            needed = recognised
         unresolvable = [
-            n for n in recognised
+            n for n in needed
             if n not in provided and n not in self.defaults
         ]
         if unresolvable:
@@ -205,6 +267,18 @@ class ModelParametrization:
         ):
             if self.mode == "fixed_z":
                 val = lookup(sample_name)
+            elif (self.mode == "powerlaw"
+                  and self._uses_powerlaw(sample_name, named_params)):
+                amp_name, exp_name = _powerlaw_names(sample_name)
+                amp, exponent = lookup(amp_name), lookup(exp_name)
+                ratio = (1.0 + z) / (1.0 + self.z_pivot)
+                if is_log:   # log10 M = logM_0 + logM_1 * log10(ratio)
+                    val = amp + exponent * math.log10(ratio)
+                else:
+                    try:
+                        val = amp * ratio ** exponent
+                    except OverflowError:  # absurd exponent; rejected
+                        val = math.inf
             else:
                 slope = lookup(slope_name)
                 offset = lookup(offset_name)
@@ -248,4 +322,7 @@ class ModelParametrization:
         return True
 
     def __repr__(self):
+        if self.mode == "powerlaw":
+            return (f"ModelParametrization(mode='powerlaw', "
+                    f"z_pivot={self.z_pivot:g})")
         return f"ModelParametrization(mode='{self.mode}')"

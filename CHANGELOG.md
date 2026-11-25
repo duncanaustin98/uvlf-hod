@@ -79,6 +79,27 @@
   (`galaxy_bias.pdf`), all with posterior 16-84% bands from the same draws as
   the UVLF band. Re-running on a converged chain adds any of them that are
   missing.
+- `ModelParametrization("powerlaw", z_pivot=...)`: power-law redshift
+  evolution `A(z) = A_0 ((1 + z)/(1 + z_pivot))**A_1`, with coefficients
+  `<x>_0` (value at the pivot) and `<x>_1` (exponent) per HOD parameter
+  (`powerlaw_param_names()`); for masses `log10 M` is linear in
+  `log10(1 + z)`. A parameter without power-law coefficients follows the
+  linear law (`d_<x>_dz`, `C_<x>`; by default the published Shuntov+25
+  evolution).
+- `examples/fit_uvlf.py --joint`: fits several EPOCHS-v2 bins at once with
+  each free parameter evolving as a power law normalised at `--z-pivot`
+  (default 7). `--no-evolve NAME` keeps a free parameter constant in z.
+  Fixed parameters follow Shuntov+25. Outputs go to
+  `EPOCHS_DR2_UVLF/joint_powerlaw/`, with a parameters-vs-z plot and the
+  single-z plots of every bin. `--joint` with a single bin runs the ordinary single-z fit.
+- `examples/fit_uvlf.py --lit [NAME ...]`: also fits literature UVLFs, by
+  default the bright-end Bowler+17, Varadaraj+23 and Varadaraj+26 points at
+  z=7 (copied from flags_data into `examples/literature_data/`, loader
+  `examples/literature_data.py`). Each set is fitted with its own bin widths,
+  shown in the UVLF plot with its residuals, saved in `params.h5` and gets
+  outputs go to a folder named after the fitted data, e.g.
+  `EPOCHS_DR2+Bowler17+Varadaraj23+Varadaraj26_UVLF/` instead of
+  `EPOCHS_DR2_UVLF/`.
 - Parallel emcee pool workers ignore SIGINT, so Ctrl-C stops a
   `processes=N` run cleanly from the main process.
 - `halogal.crosscorr`: `Selection` and `CrossCorrelation` for cross-correlations

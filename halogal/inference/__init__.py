@@ -4,7 +4,8 @@ This subpackage fits the UVHMR/HOD model to data with gradient-free samplers
 (emcee and dynesty), behind one interface. The user controls **what data** to
 fit (any mix of UVLF, clustering, and number-density datasets), **which
 parameters** are free (per-parameter ``fixed`` flag), **which redshift regime**
-(single fixed-z bin or joint redshift evolution across bins), and **which
+(single fixed-z bin, or joint linear or power-law redshift evolution
+across bins), and **which
 sampler**.
 
 Layers
@@ -53,6 +54,7 @@ from .parametrization import (
     MODEL_PARAM_NAMES,
     fixed_z_param_names,
     evolution_param_names,
+    powerlaw_param_names,
 )
 from .data import Dataset
 from .likelihood import GaussianLikelihood
@@ -71,6 +73,7 @@ __all__ = [
     "MODEL_PARAM_NAMES",
     "fixed_z_param_names",
     "evolution_param_names",
+    "powerlaw_param_names",
     "Dataset",
     "GaussianLikelihood",
     "EmceeSampler",

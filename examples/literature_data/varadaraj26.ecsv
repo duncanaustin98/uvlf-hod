@@ -1,0 +1,26 @@
+# %ECSV 1.0
+# ---
+# datatype:
+# - {name: z, datatype: float64}
+# - {name: M, unit: mag, datatype: float64}
+# - {name: phi, unit: 1 / (mag Mpc3), datatype: float64}
+# - {name: phi_err_upp, unit: 1 / (mag Mpc3), datatype: float64}
+# - {name: phi_err_low, unit: 1 / (mag Mpc3), datatype: float64}
+# - {name: deltaM, unit: mag, datatype: float64}
+# meta: !!omap
+# - {x: M}
+# - {y: phi}
+# - {name: Varadaraj et al. 2026}
+# - {type: binned}
+# - redshifts: [7.0]
+# - observatory: [VISTA, Euclid]
+# - references: [Varadaraj, R. G., et al.: A&A, 707, A239 (2026)]
+# schema: astropy-2.0
+z M phi phi_err_upp phi_err_low deltaM
+7.0 -22.2 2.13e-06 1.28e-06 1.28e-06 0.4
+7.0 -21.9 6.03e-06 3.19e-06 3.19e-06 0.2
+7.0 -21.7 9.12e-06 4.01e-06 4.01e-06 0.2
+7.0 -21.5 1.59e-05 5.6e-06 5.6e-06 0.2
+7.0 -21.3 3.23e-05 8.8e-06 8.8e-06 0.2
+7.0 -21.1 4.42e-05 1.09e-05 1.09e-05 0.2
+7.0 -20.9 5.84e-05 1.42e-05 1.42e-05 0.2

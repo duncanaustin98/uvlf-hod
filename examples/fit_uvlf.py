@@ -32,6 +32,17 @@ is what the binned 1/Vmax UVLF measures. Unlike the galfind-based EPOCHS-v2
 fitters, the width is not inferred from adjacent points: empty bins are dropped,
 so at z=7 and z=10 that difference is 1 mag.
 
+``--lit`` also fits literature UVLFs (``examples/literature_data.py``): with
+no names, the defaults of each bin (z=7: the bright-end Bowler+17,
+Varadaraj+23 and Varadaraj+26), or ``--lit Bowler+17 Varadaraj+26`` for chosen
+sets. Each set is its own dataset, with the model averaged over its own bin
+widths; the M_UV cut applies to it too. These ground-based samples share
+VISTA imaging, so they are not fully independent of each other. Runs with
+literature go under a folder named after the data, e.g.
+``examples/outputs/EPOCHS_DR2+Bowler17+Varadaraj23+Varadaraj26_UVLF/``
+instead of ``EPOCHS_DR2_UVLF/`` (same layout below it), and params.h5 stores the fitted points (group ``literature``). The UVLF plot
+shows them, with their residuals and in the chi^2.
+
 Usage (run as a script so multiprocessing works):
 
     python examples/fit_uvlf.py --z 7
@@ -39,8 +50,33 @@ Usage (run as a script so multiprocessing works):
     python examples/fit_uvlf.py --z 7 8 9 --processes 8     # one after another
     python examples/fit_uvlf.py --z all --processes 8       # every bin
 
-With several redshifts the bins are fitted in turn, each in its own folder as
-for a single run. Ctrl-C or kill writes the fit and plots of the bin being
+    python examples/fit_uvlf.py --z all --joint --processes 8   # jointly
+    python examples/fit_uvlf.py --z all --joint --no-evolve sigma_UV
+    python examples/fit_uvlf.py --z 7 --lit --processes 8   # + bright end
+
+``--joint`` with a single bin runs the ordinary single-z fit (no evolution).
+
+Joint fit (``--joint``, two or more bins): all bins are fitted at once, each
+free parameter A evolving as a power law normalised at ``--z-pivot`` z_p
+(default 7, the lowest bin):
+    A(z) = A(z_p) * ((1 + z) / (1 + z_p))**A_1
+and, for the masses, log10 M(z) = log10 M(z_p) + logM_1 log10((1+z)/(1+z_p)).
+The sampled coefficients are ``<x>_0`` = A(z_p), with the single-z prior of
+A (PRIORS), and ``<x>_1`` = the exponent, with EXPONENT_PRIOR (flat in
+[-5, 5]). ``--no-evolve NAME`` keeps a free parameter constant in z (its
+exponent fixed at 0). Fixed parameters follow the Shuntov+25 linear evolution
+(``--shuntov evo``), or are constant in z (a ``--shuntov`` bin, or
+``--fix NAME=VALUE``). Outputs go to ``<data>_UVLF/joint_powerlaw/
+fixed=..._shuntov25_<shuntov>[_const=<no-evolve names>]/z=7+8+...[_n]/``:
+chain.h5, params.h5 (with ``model``, ``z_pivot`` and the redshift of every
+fitted point), convergence.log/.pdf, corner.pdf (red: a power-law
+approximation of Shuntov+25 over the fitted z), params_vs_z.pdf (each
+evolving parameter against z, with the total chi^2) and, per bin, ``z=<z>/``
+with the single-z UVLF, SFE, M_UV-Mhalo and bias plots (chi^2 there is per
+bin over all its points, as the free parameters are shared).
+
+With several redshifts and no ``--joint``, the bins are fitted in turn, each
+in its own folder as for a single run. Ctrl-C or kill writes the fit and plots of the bin being
 sampled, skips the rest and exits with status 130; re-running the same command
 resumes that bin, and bins already converged (or at the --nsteps cap) are only
 re-plotted, not re-sampled.
@@ -61,8 +97,8 @@ cap, re-makes the fit without sampling; the plots of a converged chain are
 only remade if any is missing, or with ``--replot``.
 
 Outputs go to
-``examples/outputs/EPOCHS_DR2_UVLF/fixed=<p1>+<p2>+..._shuntov25_<shuntov>/z=<z>/``,
-which git ignores: one folder per fixed set, named from the fixed parameter
+``examples/outputs/EPOCHS_DR2_UVLF/fixed=<p1>+<p2>+..._shuntov25_<shuntov>/z=<z>/``
+(``EPOCHS_DR2+<sets>_UVLF`` with ``--lit``), which git ignores: one folder per fixed set, named from the fixed parameter
 names and the ``--shuntov`` source of their values (default
 ``fixed=logMc+b+logMcut+logMsat+asat_shuntov25_evo``; with ``--shuntov z7.3``,
 ``..._shuntov25_z7.3``). Each run records its fixed values (and
@@ -131,6 +167,8 @@ from halogal.inference import (  # noqa: E402
 )
 from halogal.inference.parametrization import HOD_PARAM_SPEC  # noqa: E402
 from halogal.model import HODModel, Observables  # noqa: E402
+from literature_data import (  # noqa: E402
+    DEFAULT_LITERATURE, LITERATURE, literature_tag, load_literature_uvlf)
 from austin26_data import (  # noqa: E402
     BIN_WIDTH, DATA_FILE, REDSHIFTS, ZBIN_EDGES, load_austin26_uvlf)
 
@@ -141,7 +179,7 @@ from austin26_data import (  # noqa: E402
 # ranges are wide and cover the Shuntov+25 values at all EPOCHS-v2 redshifts
 # (b 0.22-0.55, logMcut 10.9-15.6, logMsat 12.8-13.1, asat 0.84-1.06).
 PRIORS = {
-    "eps0": Uniform(1e-6, 10.0),
+    "eps0": Uniform(1e-6, 100.0),
     "logMc": Uniform(10.0, 14.0),
     "a": Uniform(0.0, 2.0),
     "b": Uniform(0.0, 2.0),
@@ -156,6 +194,16 @@ PRIORS = {
 FIXED_SHUNTOV = ("logMc", "b", "logMcut", "logMsat", "asat")
 
 OUTPUT_ROOT = REPO / "examples" / "outputs" / "EPOCHS_DR2_UVLF"
+
+
+def output_root(lit_names=()):
+    """Output folder named after the fitted data: ``EPOCHS_DR2_UVLF`` (the
+    default, :data:`OUTPUT_ROOT`), or with literature sets e.g.
+    ``EPOCHS_DR2+Bowler17+Varadaraj23+Varadaraj26_UVLF``."""
+    if not lit_names:
+        return OUTPUT_ROOT
+    return OUTPUT_ROOT.parent / ("EPOCHS_DR2+" + "+".join(
+        literature_tag(n) for n in lit_names) + "_UVLF")
 
 
 def fixed_spec(fix_args=(), free_args=()):
@@ -259,6 +307,9 @@ def write_params(path, record, nwalkers=None):
     with h5py.File(path, "a") as f:
         f.attrs["z"] = record["z"]
         f.attrs["masses"] = record["masses"]
+        for key in ("model", "z_pivot"):   # joint power-law fits
+            if key in record:
+                f.attrs[key] = record[key]
         if nwalkers is not None:
             f.attrs["nwalkers"] = int(nwalkers)
         for section in ("fixed", "priors"):
@@ -407,6 +458,15 @@ LABELS = {
     "logMsat": r"$\log_{10}(M_{\rm sat}/M_\odot)$",
     "asat": r"$\alpha_{\rm sat}$",
 }
+# Joint power-law fits (--joint): <x>_0 is the value at the pivot redshift
+# z_p, <x>_1 the exponent of (1+z)/(1+z_p); for masses of M itself.
+_PL_SYMBOLS = {"eps0": r"\epsilon_0", "logMc": r"M_c", "a": "a", "b": "b",
+               "sigma_UV": r"\sigma_{\rm UV}", "logMcut": r"M_{\rm cut}",
+               "logMsat": r"M_{\rm sat}", "asat": r"\alpha_{\rm sat}"}
+for _n, _sym in _PL_SYMBOLS.items():
+    LABELS[f"{_n}_0"] = (rf"$\log_{{10}}({_sym}/M_\odot)\,|_{{z_p}}$"
+                         if _n.startswith("log") else rf"${_sym}\,|_{{z_p}}$")
+    LABELS[f"{_n}_1"] = rf"${_sym}$ exponent"
 
 
 # Shuntov et al. 2025 (A&A 699, A231), Table 2 (Appendix B): posterior
@@ -485,31 +545,40 @@ def model_uvlf(obs, parametrization, named, z, muv, dmuv=BIN_WIDTH):
 # traces (display only: they are sampled, and their priors defined, in linear
 # space, and tau is estimated on the sampled values).
 LOG10_DISPLAY = {"eps0": r"$\log_{10}\,\epsilon_0$",
-                 "sigma_UV": r"$\log_{10}\,\sigma_{\rm UV}$"}
+                 "sigma_UV": r"$\log_{10}\,\sigma_{\rm UV}$",
+                 "eps0_0": r"$\log_{10}\,\epsilon_0\,|_{z_p}$",
+                 "sigma_UV_0": r"$\log_{10}\,\sigma_{\rm UV}\,|_{z_p}$"}
 
 
-def plot_corner(result, shuntov, z, path, spec, ref="Shuntov+25"):
+def fixed_lines(spec, shuntov, ref):
+    """One line per fixed parameter: its value and where it comes from."""
+    return [f"{LABELS[n]} = {shuntov[n]:.2f} ({ref})" if v is None
+            else f"{LABELS[n]} = {v:g}" for n, v in spec.items()]
+
+
+def plot_corner(result, truths, path, header, fixed_txt=""):
+    """Corner plot with ``truths`` (dict by name; missing = none) marked,
+    and ``header``, the chain length and ``fixed_txt`` to the right."""
     from halogal.inference import InferenceResult
 
     samples = np.array(result.samples, copy=True)
-    labels, truths = [], []
+    labels, truth_list = [], []
     for j, n in enumerate(result.names):
+        truth = truths.get(n)
         if n in LOG10_DISPLAY:
             samples[:, j] = np.log10(samples[:, j])
             labels.append(LOG10_DISPLAY[n])
-            truths.append(np.log10(shuntov[n]))
+            truth = (np.log10(truth) if truth is not None and truth > 0
+                     else None)
         else:
-            labels.append(LABELS[n])
-            truths.append(shuntov[n])
+            labels.append(LABELS.get(n, n))
+        truth_list.append(truth)
     shown = InferenceResult(result.names, samples, weights=result.weights)
     fig = shown.corner_plot(
-        labels=labels, truths=truths,
+        labels=labels, truths=truth_list,
         truth_color="tab:red", title_fmt=".2f",
         title_kwargs={"fontsize": 11}, label_kwargs={"fontsize": 13},
     )
-    fixed_txt = "\n".join(
-        f"{LABELS[n]} = {shuntov[n]:.2f} ({ref})" if v is None
-        else f"{LABELS[n]} = {v:g}" for n, v in spec.items())
     ex = result.extras
     n_steps = ex["n_iterations"]
     # The emcee tau estimate itself (no N/50 fallback, which would make this
@@ -523,11 +592,9 @@ def plot_corner(result, shuntov, z, path, spec, ref="Shuntov+25"):
     # To the right of the grid, so it never overlaps a panel whatever the
     # number of free parameters (savefig's tight bbox widens the figure).
     fig.text(1.0, 0.98,
-             f"EPOCHS-v2 UVLF, $z = {z:g}$\n"
-             f"red: {ref}" + (f" at $z = {z:g}$" if ref == "Shuntov+25"
-                              else "") + "\n\n" + chain_txt
-             + "\n\nfixed:\n" + fixed_txt, fontsize=11, va="top",
-             ha="left")
+             header + "\n\n" + chain_txt
+             + ("\n\nfixed:\n" + fixed_txt if fixed_txt else ""),
+             fontsize=11, va="top", ha="left")
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
 
@@ -582,14 +649,13 @@ def posterior_draws(result, n_draws=200, seed=0):
 
 def fit_title(result, z, what="EPOCHS-v2 UVLF"):
     zlo, zhi = ZBIN_EDGES[z]
-    free_txt = ", ".join(LABELS[n] for n in result.names)
+    free_txt = ", ".join(LABELS.get(n, n) for n in result.names)
     return f"{what}, ${zlo:g} < z < {zhi:g}$\nfree: {free_txt}"
 
 
 def fixed_box(ax, spec, shuntov, ref, x=0.03, y=0.97, ha="left", va="top"):
     """Text box listing the fixed parameters and their values."""
-    lines = [f"{LABELS[n]} = {shuntov[n]:.2f} ({ref})" if v is None
-             else f"{LABELS[n]} = {v:g}" for n, v in spec.items()]
+    lines = fixed_lines(spec, shuntov, ref)
     if lines:
         ax.text(x, y, "fixed:\n" + "\n".join(lines), transform=ax.transAxes,
                 ha=ha, va=va, fontsize=9,
@@ -598,11 +664,24 @@ def fixed_box(ax, spec, shuntov, ref, x=0.03, y=0.97, ha="left", va="top"):
 
 def plot_uvlf_residuals(result, like, dataset, data_all, shuntov, z, muv_max,
                         path, n_draws=200, seed=0, grid_step=0.1, spec=None,
-                        ref="Shuntov+25"):
+                        ref="Shuntov+25", n_free=None, lit=()):
+    """Data, model band and log residuals of one redshift bin.
+
+    ``n_free`` (default: the free parameters of ``result``) is subtracted
+    from the bin's points for the dof; a joint fit passes 0, as its free
+    parameters are shared by all bins. ``lit`` is a list of fitted
+    literature sets ``(Dataset, data dict)`` at this z: shown with their own
+    markers, and included in the residuals and chi^2. The model curves are
+    averaged over the EPOCHS-v2 bin width; each set's residuals use the model
+    averaged over its own bin widths, as fitted.
+    """
     parametrization = like.parametrization
     obs = plot_observables(like, z)
 
-    muv_grid = np.arange(-23.5, -16.5 + grid_step / 2, grid_step)
+    bright = min([-23.5] + [float(np.min(d["MUV"] - d["dMUV"] / 2)) - 0.2
+                            for _, d in lit])
+    muv_grid = np.arange(np.floor(bright * 2) / 2, -16.5 + grid_step / 2,
+                         grid_step)
     draws = np.array([model_uvlf(obs, parametrization, named, z, muv_grid)
                       for named in posterior_draws(result, n_draws, seed)])
     lo, hi = np.percentile(draws, [16, 84], axis=0)
@@ -612,9 +691,13 @@ def plot_uvlf_residuals(result, like, dataset, data_all, shuntov, z, muv_max,
 
     # Goodness of fit at the posterior median, using the likelihood's own
     # model and split-normal chi^2 (side-selected errors).
-    model_fit = like.predict_all(median)[dataset.label]["model"]
-    stats = goodness_of_fit(dataset.chi2(model_fit), dataset.data.size,
-                            len(result.names))
+    predicted = like.predict_all(median)
+    model_fit = predicted[dataset.label]["model"]
+    fitted = [dataset] + [ds for ds, _ in lit]
+    stats = goodness_of_fit(
+        sum(ds.chi2(predicted[ds.label]["model"]) for ds in fitted),
+        sum(ds.data.size for ds in fitted),
+        len(result.names) if n_free is None else n_free)
 
     # Points excluded by the magnitude cut (shown, not fitted).
     excl = data_all["MUV"] > muv_max if muv_max is not None else \
@@ -644,12 +727,22 @@ def plot_uvlf_residuals(result, like, dataset, data_all, shuntov, z, muv_max,
                           data_all["phi_err_upp"][excl]],
                     fmt="o", mfc="none", color="0.5", ms=6, capsize=2,
                     label="EPOCHS-v2 (not fitted)", zorder=5)
+    for ds, d in lit:
+        ax.errorbar(d["MUV"], d["phi"], yerr=[d["phi_err_low"],
+                                               d["phi_err_upp"]],
+                    capsize=2, ms=6, mec="k", zorder=6,
+                    label=f"{d['name']} ({d['survey']})",
+                    **LIT_STYLES.get(d["name"], dict(fmt="s")))
     # Lower error bars reaching zero would vanish on a log axis; clip the view.
-    ymin = 0.3 * np.min(data_all["phi"] - data_all["phi_err_low"],
-                        where=data_all["phi"] - data_all["phi_err_low"] > 0,
-                        initial=np.min(data_all["phi"]))
+    phi_all = np.concatenate([data_all["phi"]] + [d["phi"] for _, d in lit])
+    low_all = np.concatenate([data_all["phi_err_low"]]
+                             + [d["phi_err_low"] for _, d in lit])
+    upp_all = np.concatenate([data_all["phi_err_upp"]]
+                             + [d["phi_err_upp"] for _, d in lit])
+    ymin = 0.3 * np.min(phi_all - low_all, where=phi_all - low_all > 0,
+                        initial=np.min(phi_all))
     ax.set_yscale("log")
-    ax.set_ylim(max(ymin, 1e-8), 3 * np.max(data_all["phi"] + data_all["phi_err_upp"]))
+    ax.set_ylim(max(ymin, 1e-9), 3 * np.max(phi_all + upp_all))
     ax.set_ylabel(r"$\Phi\ [{\rm Mpc^{-3}\,mag^{-1}}]$")
     ax.set_title(fit_title(result, z), fontsize=11)
     spec = fixed_spec() if spec is None else spec
@@ -680,6 +773,12 @@ def plot_uvlf_residuals(result, like, dataset, data_all, shuntov, z, muv_max,
             data_all["phi_err_upp"][excl], model_excl)
         parts.append((data_all["MUV"][excl], y_ex, lo_ex, hi_ex,
                       dict(fmt="o", mfc="none", color="0.5", ms=6, capsize=2)))
+    for ds, d in lit:
+        y_l, lo_l, hi_l = log_ratio(ds.data, ds.sigma_low, ds.sigma_upp,
+                                    predicted[ds.label]["model"])
+        parts.append((ds.x, y_l, lo_l, hi_l,
+                      dict(ms=6, capsize=2, mec="k",
+                           **LIT_STYLES.get(d["name"], dict(fmt="s")))))
     finite = np.concatenate([np.concatenate([lo[np.isfinite(lo)], hi])
                              for _, _, lo, hi, _ in parts])
     lim = max(0.5, 1.15 * np.max(np.abs(finite)))
@@ -705,6 +804,88 @@ def plot_uvlf_residuals(result, like, dataset, data_all, shuntov, z, muv_max,
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
     return stats
+
+
+# Markers of the literature sets (as in EPOCHS-v2/scripts/hod_param_impact.py).
+LIT_STYLES = {
+    "Bowler+17": dict(fmt="p", color="tab:green"),
+    "Varadaraj+23": dict(fmt="v", color="tab:cyan"),
+    "Varadaraj+26": dict(fmt="h", color="tab:purple"),
+}
+
+
+def literature_sets(lit_arg, z, muv_max):
+    """Literature UVLF sets to fit at z: ``[(Dataset, data dict), ...]``.
+
+    ``lit_arg`` is ``--lit``: None (no literature), [] (the defaults at z,
+    :data:`DEFAULT_LITERATURE`) or a list of names. Sets with no data within
+    0.5 of z (or none passing the M_UV cut) are skipped with a note.
+    """
+    if lit_arg is None:
+        return []
+    names = (DEFAULT_LITERATURE.get(float(z), ()) if len(lit_arg) == 0
+             else lit_arg)
+    out = []
+    for name in names:
+        d = load_literature_uvlf(name, z, muv_max=muv_max)
+        if d is None:
+            print(f"  {name}: no data at z = {z:g} (within 0.5); not fitted")
+            continue
+        ds = Dataset.uvlf(z=z, MUV=d["MUV"], phi=d["phi"],
+                          sigma_low=d["phi_err_low"],
+                          sigma_upp=d["phi_err_upp"], dMUV=d["dMUV"],
+                          label=f"{name} z={z:g}")
+        print(f"  {name} ({d['survey']}, z = {d['z']:g}): fitting "
+              f"{ds.data.size} bins, M_UV = {d['MUV'].min():g} to "
+              f"{d['MUV'].max():g}")
+        out.append((ds, d))
+    if not out:
+        print(f"  no literature data at z = {z:g}: fitting EPOCHS-v2 only")
+    return out
+
+
+def literature_line(lit):
+    """``\n+ Bowler+17, ...`` for plot headers; empty without literature."""
+    names = list(dict.fromkeys(d["name"] for _, d in lit))
+    return "\n+ " + ", ".join(names) if names else ""
+
+
+def literature_settings(lit):
+    """Run settings of the literature sets (added only when some are fitted,
+    so the settings of EPOCHS-only runs, and their resumes, are unchanged)."""
+    import hashlib
+
+    if not lit:
+        return {}
+    h = hashlib.sha256()
+    for ds, _ in lit:
+        for arr in (np.atleast_1d(ds.z), ds.x, ds.data, ds.sigma_low,
+                    ds.sigma_upp, np.broadcast_to(np.asarray(ds.dMUV, float),
+                                                  ds.x.shape)):
+            h.update(np.ascontiguousarray(arr, dtype=float).tobytes())
+    return {"literature": [ds.label for ds, _ in lit],
+            "literature_sha256": h.hexdigest()}
+
+
+def write_literature(path, lit):
+    """Save the fitted literature points to the params file: group
+    ``literature/<set label>`` with datasets ``MUV``, ``phi``, ``phi_err_low``,
+    ``phi_err_upp``, ``dMUV`` and attributes ``name``, ``survey``, ``z``
+    (fit) and ``z_table``. The group is removed when none are fitted."""
+    import h5py
+
+    with h5py.File(path, "a") as f:
+        if "literature" in f:
+            del f["literature"]
+        if not lit:
+            return
+        grp = f.create_group("literature")
+        for ds, d in lit:
+            sub = grp.create_group(ds.label)
+            for k in DATA_ARRAYS + ("dMUV",):
+                sub.create_dataset(k, data=np.asarray(d[k], float))
+            sub.attrs.update(name=d["name"], survey=d["survey"],
+                             z=float(ds.z), z_table=d["z"])
 
 
 # Halo-mass grid of the SFE-Mhalo and M_UV-Mhalo plots, log10(Mh / Msun).
@@ -744,9 +925,15 @@ def halo_relation(result, like, shuntov, z, func, n_draws=200, seed=0):
 
 
 def fitted_muv_range(dataset):
-    """Brightest and faintest edge of the fitted M_UV bins."""
-    half = np.max(np.atleast_1d(dataset.dMUV)) / 2
-    return np.min(dataset.x) - half, np.max(dataset.x) + half
+    """Brightest and faintest edge of the fitted M_UV bins of a Dataset, or
+    of a list of them (EPOCHS-v2 and any literature sets)."""
+    datasets = dataset if isinstance(dataset, (list, tuple)) else [dataset]
+    lo, hi = [], []
+    for d in datasets:
+        half = np.broadcast_to(np.asarray(d.dMUV, float), d.x.shape) / 2
+        lo.append(np.min(d.x - half))
+        hi.append(np.max(d.x + half))
+    return min(lo), max(hi)
 
 
 def fitted_mh_range(muv_of_mh, dataset):
@@ -1056,18 +1243,26 @@ def make_plots(result, burnin, chain_source, ctx, n_draws, grid_step=0.1):
     Returns the goodness-of-fit and convergence summaries.
     """
     a = ctx["args"]
-    plot_corner(result, ctx["shuntov"], a.z, a.outdir / "corner.pdf",
-                ctx["spec"], ref=ctx["ref"])
+    ref = ctx["ref"]
+    lit = ctx.get("lit", [])
+    plot_corner(result, ctx["shuntov"], a.outdir / "corner.pdf",
+                header=(f"EPOCHS-v2 UVLF, $z = {a.z:g}$"
+                        + literature_line(lit) + f"\nred: {ref}"
+                        + (f" at $z = {a.z:g}$" if ref == "Shuntov+25"
+                           else "")),
+                fixed_txt="\n".join(fixed_lines(ctx["spec"], ctx["shuntov"],
+                                                ref)))
     gof = plot_uvlf_residuals(
         result, ctx["like"], ctx["dataset"], ctx["data_all"], ctx["shuntov"],
         a.z, a.muv_max, a.outdir / "uvlf_residuals.pdf",
         n_draws=n_draws, seed=a.seed, grid_step=grid_step, spec=ctx["spec"],
-        ref=ctx["ref"])
+        ref=ctx["ref"], lit=lit)
     common = dict(n_draws=n_draws, seed=a.seed, spec=ctx["spec"],
                   ref=ctx["ref"])
-    plot_sfe_mhalo(result, ctx["like"], ctx["dataset"], ctx["shuntov"], a.z,
+    fitted = [ctx["dataset"]] + [ds for ds, _ in lit]
+    plot_sfe_mhalo(result, ctx["like"], fitted, ctx["shuntov"], a.z,
                    a.outdir / "sfe_mhalo.pdf", **common)
-    plot_muv_mhalo(result, ctx["like"], ctx["dataset"], ctx["shuntov"], a.z,
+    plot_muv_mhalo(result, ctx["like"], fitted, ctx["shuntov"], a.z,
                    a.outdir / "muv_mhalo.pdf", **common)
     plot_galaxy_bias(result, ctx["like"], ctx["dataset"], ctx["shuntov"],
                      a.z, a.muv_max, a.outdir / "galaxy_bias.pdf",
@@ -1339,8 +1534,9 @@ def write_data(path, rec):
         if "data" in f:
             del f["data"]
         grp = f.create_group("data")
-        for k in DATA_ARRAYS:
-            grp.create_dataset(k, data=rec[k])
+        for k in DATA_ARRAYS + ("z",):
+            if k in rec:   # z: redshift of each point, joint fits only
+                grp.create_dataset(k, data=rec[k])
         grp.attrs["dMUV"] = rec["dMUV"]
         grp.attrs["muv_max"] = rec["muv_max"]
         grp.attrs["source"] = rec["source"]
@@ -1357,7 +1553,7 @@ def read_data(path):
         if "data" not in f:
             return None
         grp = f["data"]
-        rec = {k: grp[k][()] for k in DATA_ARRAYS}
+        rec = {k: grp[k][()] for k in DATA_ARRAYS + ("z",) if k in grp}
         rec["dMUV"] = float(grp.attrs["dMUV"])
         rec["muv_max"] = float(grp.attrs["muv_max"])
     return rec
@@ -1365,7 +1561,10 @@ def read_data(path):
 
 def data_matches(stored, current):
     """Same fitted points, bin width and cut (NaN cuts compare equal)."""
-    if any(not np.array_equal(stored[k], current[k]) for k in DATA_ARRAYS):
+    keys = DATA_ARRAYS + ("z",)
+    if any((k in stored) != (k in current)
+           or (k in stored and not np.array_equal(stored[k], current[k]))
+           for k in keys):
         return False
     return (stored["dMUV"] == current["dMUV"]
             and (stored["muv_max"] == current["muv_max"]
@@ -1388,10 +1587,11 @@ def checkpoint_state(path):
     return n, (json.loads(stored) if stored is not None else None)
 
 
-def choose_run_dir(fixed_dir, z, settings, data):
-    """Redshift run folder within ``fixed_dir`` for these settings and data.
+def choose_run_dir(fixed_dir, base, settings, data):
+    """Run folder within ``fixed_dir`` for these settings and data.
 
-    Tries ``z=<z>``, then ``z=<z>_2``, ``z=<z>_3``, ... and skips a folder
+    Tries ``base`` (e.g. ``z=7``, or ``z=7+8+9`` for a joint fit), then
+    ``<base>_2``, ``<base>_3``, ... and skips a folder
     whose ``params.h5`` holds different fitted data (:func:`data_matches`),
     or whose chain was run with different settings (:func:`run_settings`).
     It returns the first remaining folder, which either has no chain yet or
@@ -1399,7 +1599,6 @@ def choose_run_dir(fixed_dir, z, settings, data):
     different M_UV cut, HMF grid or number of walkers each get their own
     folder instead of being refused.
     """
-    base = z_folder(z)
     k = 1
     while True:
         run_dir = fixed_dir / (base if k == 1 else f"{base}_{k}")
@@ -1418,6 +1617,383 @@ def choose_run_dir(fixed_dir, z, settings, data):
                       if stored.get(k_) != settings.get(k_))
         print(f"  {run_dir.name}: run settings differ ({', '.join(diff)})")
         k += 1
+
+
+# ---------------------------------------------------------------------------
+# Joint fit of several redshift bins with power-law evolution (--joint)
+# ---------------------------------------------------------------------------
+# Each free parameter A evolves as A(z) = A_0 ((1+z)/(1+z_p))^A_1, with the
+# pivot z_p = --z-pivot (default 7, the lowest EPOCHS-v2 bin). A_0, the value
+# at z_p, has the single-z prior of A (PRIORS); the exponent A_1 has
+# EXPONENT_PRIOR. For masses, log10 M(z) = logM_0 + logM_1 log10((1+z)/(1+z_p)).
+# Fixed parameters follow the Shuntov+25 linear evolution (--shuntov evo), or
+# are constant in z (a --shuntov bin, or --fix NAME=VALUE). --no-evolve NAME
+# keeps a free parameter constant in z (exponent fixed at 0).
+EXPONENT_PRIOR = Uniform(-5.0, 5.0)
+JOINT_DIR = "joint_powerlaw"   # subfolder of output_root() for joint fits
+JOINT_PLOT_KINDS = ("uvlf_residuals", "sfe_mhalo", "muv_mhalo", "galaxy_bias")
+
+
+def shuntov_linear_coeffs(source):
+    """Shuntov+25 as linear-law coefficients ``{d_<x>_dz: .., C_<x>: ..}``:
+    their evolution (``evo``), or a bin's values held constant in z."""
+    from halogal.config import DEFAULT_REDSHIFT_EVOLUTION
+
+    if source == "evo":
+        return dict(DEFAULT_REDSHIFT_EVOLUTION)
+    vals = shuntov25_values(0.0, source)
+    out = {}
+    for _, sample, _, slope, offset in HOD_PARAM_SPEC:
+        out[slope], out[offset] = 0.0, vals[sample]
+    return out
+
+
+def joint_reference(z, source):
+    """Shuntov+25 reference for a joint fit, at z: their sampling-space
+    values (used by the plot labels and fixed boxes) together with their
+    linear-law coefficients. In ``powerlaw`` mode a parameter without
+    power-law coefficients follows the linear law, so this dict makes the
+    joint model reproduce Shuntov+25 exactly."""
+    return {**shuntov25_values(z, source), **shuntov_linear_coeffs(source)}
+
+
+def shuntov_powerlaw(source, zs, z_pivot):
+    """Power-law approximation of Shuntov+25 over the fitted redshifts:
+    ``{<x>_0, <x>_1}`` per parameter. ``<x>_0`` is their value at the pivot;
+    ``<x>_1`` the least-squares slope of log A (log M for masses) against
+    log10((1+z)/(1+z_p)) through the pivot (0 if A <= 0 somewhere). Used as
+    the corner-plot reference and the 'fiducial' walker start."""
+    x = np.log10((1 + np.asarray(zs, float)) / (1 + z_pivot))
+    at_pivot = shuntov25_values(z_pivot, source)
+    out = {}
+    for _, sample, is_log, _, _ in HOD_PARAM_SPEC:
+        vals = np.array([shuntov25_values(z, source)[sample] for z in zs])
+        amp = at_pivot[sample]
+        if is_log:
+            y = vals - amp
+        elif np.all(vals > 0) and amp > 0:
+            y = np.log10(vals / amp)
+        else:
+            y = np.zeros_like(x)
+        out[f"{sample}_0"] = amp
+        out[f"{sample}_1"] = (float(np.sum(x * y) / np.sum(x * x))
+                              if np.any(x != 0) else 0.0)
+    return out
+
+
+def build_joint_parameters(spec, source, zs, z_pivot, no_evolve=()):
+    """ParameterSet of a joint power-law fit, and the role of each name.
+
+    Free parameters (not in ``spec``): ``<x>_0`` with prior PRIORS[x] and
+    ``<x>_1`` with EXPONENT_PRIOR (fixed at 0 if in ``no_evolve``). Fixed
+    ones: their linear-law coefficients, the Shuntov+25 ones (``None`` in
+    ``spec``) or slope 0 and the explicit value. Walkers start at
+    :func:`shuntov_powerlaw` where inside the prior.
+
+    Returns ``(ParameterSet, roles)``, with ``roles[name] = (hod_name,
+    method)`` for every fixed name (method as recorded in params.h5).
+    """
+    start = shuntov_powerlaw(source, zs, z_pivot)
+    linear = shuntov_linear_coeffs(source)
+    params, roles = [], {}
+    for _, sample, _, slope, offset in HOD_PARAM_SPEC:
+        if sample in spec:
+            value = spec[sample]
+            if value is None:
+                method = shuntov_method(source)
+                coeffs = (linear[slope], linear[offset])
+            else:
+                method, coeffs = "explicit", (0.0, value)
+            for name, v in zip((slope, offset), coeffs):
+                params.append(Parameter(name, fixed=True, value=v))
+                roles[name] = (sample, method)
+            continue
+        amp, exp = f"{sample}_0", f"{sample}_1"
+        for name, prior in ((amp, PRIORS[sample]), (exp, EXPONENT_PRIOR)):
+            if name == exp and sample in no_evolve:
+                params.append(Parameter(name, fixed=True, value=0.0))
+                roles[name] = (sample, "no_evolve")
+                continue
+            ok = np.isfinite(prior.logpdf(start[name]))
+            params.append(Parameter(name, prior,
+                                    value=start[name] if ok else None))
+    if not params or all(p.fixed for p in params):
+        raise SystemExit("Every parameter is fixed: nothing to fit.")
+    return ParameterSet(params), roles
+
+
+def joint_params_record(params, roles, zs, z_pivot, source):
+    """JSON-ready record of a joint fit's fixed values and priors (layout of
+    :func:`params_record`, plus ``model`` and ``z_pivot``)."""
+    import json
+
+    def where(name):
+        hod, method = roles[name]
+        if method == "explicit":
+            return f"--fix {hod} (constant in z)"
+        if method == "no_evolve":
+            return f"--no-evolve {hod} (exponent 0)"
+        return ("Shuntov+25 linear evolution" if source == "evo"
+                else f"Shuntov+25 z~{source[1:]} bin, constant in z")
+
+    record = {
+        "z": [float(z) for z in zs],
+        "model": "powerlaw",
+        "z_pivot": float(z_pivot),
+        "masses": "log10(M / Msun)",
+        "fixed": {p.name: {"value": float(p.value),
+                           "method": roles[p.name][1],
+                           "source": where(p.name)}
+                  for p in params.fixed_params},
+        "priors": {p.name: _prior_record(p.prior) for p in params.free},
+    }
+    return json.loads(json.dumps(record))
+
+
+def joint_run_settings(args, params, datasets):
+    """:func:`run_settings` of a joint fit: everything defining its
+    posterior (redshifts, pivot, cut, grid, walkers, priors, fixed values,
+    and a hash of the fitted data of every bin)."""
+    import hashlib
+    import json
+
+    h = hashlib.sha256()
+    for d in datasets:
+        for arr in (np.atleast_1d(d.z), d.x, d.data, d.sigma_low,
+                    d.sigma_upp):
+            h.update(np.ascontiguousarray(arr, dtype=float).tobytes())
+    settings = {
+        "model": "powerlaw",
+        "z": [float(z) for z in args.redshifts],
+        "z_pivot": args.z_pivot,
+        "muv_max": args.muv_max,
+        "dMUV": datasets[0].dMUV,
+        "hmf_points": args.hmf_points,
+        "nwalkers": args.nwalkers,
+        "free_priors": {p.name: repr(p.prior) for p in params.free},
+        "fixed": {p.name: float(p.value) for p in params.fixed_params},
+        "data_sha256": h.hexdigest(),
+    }
+    return json.loads(json.dumps(settings))
+
+
+def joint_fixed_lines(spec, source, ref, no_evolve):
+    """Fixed parameters of a joint fit, one line each, for the plots."""
+    lines = [(f"{LABELS[n]}: {ref} z-evolution" if source == "evo"
+              else f"{LABELS[n]} = {shuntov25_values(0, source)[n]:.2f} "
+                   f"({ref})") if v is None
+             else f"{LABELS[n]} = {v:g}" for n, v in spec.items()]
+    lines += [f"{LABELS[n]}: free, constant in z" for n in no_evolve]
+    return lines
+
+
+def plot_params_vs_z(result, like, zs, source, ref, path, n_draws=200,
+                     seed=0, gof=None):
+    """Each power-law parameter against z: posterior median and 16-84% band
+    over the fitted range (extended by 0.5 either side), the Shuntov+25
+    evolution, the fitted bin centres and the pivot, with the exponent's
+    posterior quoted per panel."""
+    par = like.parametrization
+    model_of = {sample: (model, is_log)
+                for model, sample, is_log, _, _ in HOD_PARAM_SPEC}
+    shown = [sample for _, sample, *_ in HOD_PARAM_SPEC
+             if f"{sample}_0" in result.parameter_set.names
+             or f"{sample}_1" in result.parameter_set.names]
+    z_grid = np.linspace(min(zs) - 0.5, max(zs) + 0.5, 56)
+
+    def curves(named):
+        rows = [par.params_for_redshift(named, z) for z in z_grid]
+        out = {}
+        for sample in shown:
+            model, is_log = model_of[sample]
+            v = np.array([r[model] for r in rows])
+            out[sample] = np.log10(v) if is_log else v
+        return out
+
+    draws = [curves(d) for d in posterior_draws(result, n_draws, seed)]
+    med = curves(result.median_params())
+    refc = curves(joint_reference(zs[0], source))
+    quant = result.parameter_set.names
+
+    ncol = min(3, len(shown))
+    nrow = int(np.ceil(len(shown) / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(4.6 * ncol, 3.8 * nrow),
+                             squeeze=False)
+    for ax, sample in zip(axes.flat, shown):
+        lo, hi = np.percentile([d[sample] for d in draws], [16, 84], axis=0)
+        ax.fill_between(z_grid, lo, hi, color="tab:blue", alpha=0.3, lw=0,
+                        label="posterior 16-84%")
+        ax.plot(z_grid, med[sample], color="tab:blue", lw=2,
+                label="posterior median")
+        ax.plot(z_grid, refc[sample], color="tab:red", ls="--", lw=1.5,
+                label=ref)
+        for z in zs:
+            ax.axvline(z, color="0.85", lw=0.8, zorder=0)
+        ax.axvline(par.z_pivot, color="0.4", ls=":", lw=1,
+                   label=f"pivot $z_p={par.z_pivot:g}$")
+        exp = f"{sample}_1"
+        if exp in result.names:
+            j = result.names.index(exp)
+            q16, q50, q84 = np.percentile(result.samples[:, j], [16, 50, 84])
+            txt = (rf"exponent $= {q50:.2f}^{{+{q84 - q50:.2f}}}"
+                   rf"_{{-{q50 - q16:.2f}}}$")
+        else:
+            txt = "constant in z"
+        ax.text(0.97, 0.95, txt, transform=ax.transAxes, ha="right",
+                va="top", fontsize=10,
+                bbox=dict(boxstyle="round", fc="white", ec="0.7"))
+        ax.set_ylabel(LABELS[sample])
+        if sample in LOG10_DISPLAY:   # eps0, sigma_UV: log axis, as corner
+            ax.set_yscale("log")
+        ax.set_xlabel("$z$")
+        ax.set_xlim(z_grid[0], z_grid[-1])
+    for ax in list(axes.flat)[len(shown):]:
+        ax.set_visible(False)
+    axes.flat[0].legend(loc="lower left", fontsize=8)
+    title = ("EPOCHS-v2 UVLF joint fit, $z = "
+             + ", ".join(f"{z:g}" for z in zs) + "$: "
+             r"$A(z) = A(z_p)\,[(1+z)/(1+z_p)]^{\rm exponent}$")
+    if gof is not None:
+        title += ("\n" + rf"$\chi^2/{{\rm dof}} = {gof['chi2']:.1f}/{gof['dof']}"
+                  rf" = {gof['chi2_red']:.2f}$, $p = {gof['p_value']:.2g}$"
+                  " (all bins, posterior median)")
+    fig.suptitle(title, fontsize=11)
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def joint_plot_paths(outdir, zs):
+    return ([outdir / f"{k}.pdf" for k in ("corner", "params_vs_z",
+                                           "convergence")]
+            + [outdir / z_folder(z) / f"{k}.pdf"
+               for z in zs for k in JOINT_PLOT_KINDS])
+
+
+def make_joint_plots(result, burnin, chain_source, ctx):
+    """Corner, parameters-vs-z and convergence plots in the run folder, and
+    the single-z plots (UVLF + residuals, SFE, M_UV-Mh, bias) of each bin
+    in its ``z=<z>`` subfolder. Returns the convergence summary."""
+    a, like, zs = ctx["args"], ctx["like"], ctx["zs"]
+    ref, spec, source = ctx["ref"], ctx["spec"], a.shuntov
+    truths = shuntov_powerlaw(source, zs, a.z_pivot)
+    plot_corner(
+        result, truths, a.outdir / "corner.pdf",
+        header=("EPOCHS-v2 UVLF, joint fit\n$z = "
+                + ", ".join(f"{z:g}" for z in zs) + "$"
+                + literature_line([x for z in zs for x in ctx["lit"][z]])
+                + "\n" + rf"power law in $(1+z)/(1+z_p)$, $z_p = {a.z_pivot:g}$"
+                f"\nred: {ref} (power-law\napproximation over these z)"),
+        fixed_txt="\n".join(joint_fixed_lines(spec, source, ref,
+                                              a.no_evolve)))
+    gof = goodness_of_fit(like.chi2(result.median_params()), like.ndata,
+                          len(result.names))
+    plot_params_vs_z(result, like, zs, source, ref,
+                     a.outdir / "params_vs_z.pdf", n_draws=a.plot_draws,
+                     seed=a.seed, gof=gof)
+    common = dict(n_draws=a.plot_draws, seed=a.seed, spec=spec, ref=ref)
+    for z, dataset in zip(zs, ctx["datasets"]):
+        print(f"  plots of z = {z:g}", flush=True)
+        zdir = a.outdir / z_folder(z)
+        zdir.mkdir(exist_ok=True)
+        refz = joint_reference(z, source)
+        lit = ctx["lit"][z]
+        fitted = [dataset] + [ds for ds, _ in lit]
+        plot_uvlf_residuals(result, like, dataset, ctx["data_all"][z], refz,
+                            z, a.muv_max, zdir / "uvlf_residuals.pdf",
+                            n_free=0, lit=lit, **common)
+        plot_sfe_mhalo(result, like, fitted, refz, z,
+                       zdir / "sfe_mhalo.pdf", **common)
+        plot_muv_mhalo(result, like, fitted, refz, z,
+                       zdir / "muv_mhalo.pdf", **common)
+        plot_galaxy_bias(result, like, dataset, refz, z, a.muv_max,
+                         zdir / "galaxy_bias.pdf", **common)
+    return plot_convergence(chain_source, result.names, burnin,
+                            a.outdir / "convergence.pdf",
+                            check_every=a.check_every)
+
+
+def run_joint(args):
+    """Fit all ``args.redshifts`` bins at once with power-law evolution.
+
+    Same sampling, checkpointing, resuming and outputs as
+    :func:`run_redshift`, in ``output_root()/joint_powerlaw/
+    fixed=..._shuntov25_<src>
+    [_const=..]/z=<z1>+<z2>+...[_n]/``.
+    """
+    zs = args.redshifts
+    spec = fixed_spec(args.fix, args.free)
+    bad = [n for n in args.no_evolve if n in spec or n not in PRIORS]
+    if bad:
+        raise SystemExit(f"--no-evolve {', '.join(bad)}: only free "
+                         "parameters can be held constant in z")
+    ref = shuntov_label(args.shuntov)
+    print(f"Joint fit of z = {', '.join(f'{z:g}' for z in zs)}: free "
+          "parameters evolve as A(z) = A(z_p) [(1+z)/(1+z_p)]^A_1, "
+          f"z_p = {args.z_pivot:g}")
+
+    datasets, data_all, fitted = [], {}, []
+    for z in zs:
+        data_all[z] = load_austin26_uvlf(z)
+        d = load_austin26_uvlf(z, muv_max=args.muv_max)
+        fitted.append(d)
+        datasets.append(Dataset.uvlf(
+            z=z, MUV=d["MUV"], phi=d["phi"], sigma_low=d["phi_err_low"],
+            sigma_upp=d["phi_err_upp"], dMUV=d["dMUV"],
+            label=f"EPOCHS-v2 UVLF z={z:g}"))
+        print(f"  z = {z:g}: fitting {datasets[-1].data.size} of "
+              f"{len(data_all[z]['MUV'])} bins (M_UV <= {args.muv_max})")
+    lit = {z: literature_sets(args.lit, z, args.muv_max) for z in zs}
+    lit_all = [item for z in zs for item in lit[z]]
+
+    params, roles = build_joint_parameters(spec, args.shuntov, zs,
+                                           args.z_pivot, args.no_evolve)
+    print("Free: " + ", ".join(params.names))
+    record = joint_params_record(params, roles, zs, args.z_pivot,
+                                 args.shuntov)
+    settings = {**joint_run_settings(args, params, datasets),
+                **literature_settings(lit_all)}
+    data_rec = {k: np.concatenate([np.asarray(d[k], float) for d in fitted])
+                for k in DATA_ARRAYS}
+    data_rec["z"] = np.concatenate([np.full(len(d["MUV"]), z)
+                                    for z, d in zip(zs, fitted)])
+    data_rec.update(dMUV=float(BIN_WIDTH), source=DATA_FILE.name,
+                    muv_max=(np.nan if args.muv_max is None
+                             else float(args.muv_max)))
+    if args.outdir is None:
+        label = fixed_label(spec, args.shuntov) + (
+            f"_const={'+'.join(args.no_evolve)}" if args.no_evolve else "")
+        root = output_root(list(dict.fromkeys(d["name"]
+                                              for _, d in lit_all)))
+        fixed_dir = root / JOINT_DIR / label
+        base = "z=" + "+".join(f"{z:g}" for z in zs)
+        print(f"Choosing the output folder in {fixed_dir}:")
+        args.outdir, how = choose_run_dir(fixed_dir, base, settings,
+                                          data_rec)
+        print(f"  using {args.outdir.name} ({how})")
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    print(f"Output folder: {args.outdir}")
+    params_path = args.outdir / "params.h5"
+    stored = read_data(params_path)
+    if stored is not None and not data_matches(stored, data_rec):
+        raise SystemExit(f"{params_path} holds different fitted data from "
+                         "this run; use another --outdir.")
+    write_params(params_path, record, nwalkers=args.nwalkers)
+    write_data(params_path, data_rec)
+    write_literature(params_path, lit_all)
+
+    like = GaussianLikelihood(
+        datasets + [ds for ds, _ in lit_all],
+        ModelParametrization("powerlaw", params, z_pivot=args.z_pivot),
+        hmf_points=args.hmf_points)
+    ctx = dict(args=args, like=like, zs=zs, ref=ref, spec=spec,
+               datasets=datasets, data_all=data_all, lit=lit)
+    return run_chain(
+        args, params, like, settings, ref, joint_reference(zs[0],
+                                                           args.shuntov),
+        plot_paths=joint_plot_paths(args.outdir, zs),
+        plot_fn=lambda result, burnin, ck: make_joint_plots(
+            result, burnin, ck, ctx))
 
 
 MOVES_HELP = {
@@ -1559,13 +2135,46 @@ def parse_args():
     ap.add_argument("--outdir", type=Path, default=None,
                     help="run folder (with several --z: parent of one "
                          "z=<z> folder each); default: the matching "
-                         "examples/outputs/EPOCHS_DR2_UVLF/"
+                         "examples/outputs/EPOCHS_DR2[+<--lit sets>]_UVLF/"
                          "fixed=<p1>+<p2>..._shuntov25_<shuntov>[_n]/"
                          "z=<z>[_n] (see "
                          "above); "
                          "giving --outdir skips that search")
+    ap.add_argument("--joint", action="store_true",
+                    help="fit all --z bins at once, each free parameter A "
+                         "evolving as A(z) = A(z_p) [(1+z)/(1+z_p)]^A_1 "
+                         "(with one bin: the single-z fit, no evolution)")
+    ap.add_argument("--z-pivot", type=float, default=7.0,
+                    help="--joint: pivot redshift z_p where each power law "
+                         "is normalised (default 7)")
+    ap.add_argument("--no-evolve", action="append", default=[],
+                    metavar="NAME",
+                    help="--joint: keep free parameter NAME constant in z "
+                         "(exponent fixed at 0). Repeatable")
+    ap.add_argument("--lit", nargs="*", default=None, metavar="NAME",
+                    help="also fit literature UVLFs: with no NAME, the "
+                         "defaults of each bin ("
+                         + "; ".join(f"z={z:g}: {', '.join(n)}"
+                                     for z, n in DEFAULT_LITERATURE.items())
+                         + "); or the named sets, any of "
+                         + ", ".join(LITERATURE)
+                         + ". Default: EPOCHS-v2 only")
     args = ap.parse_args()
     args.redshifts = parse_redshifts(args.z)
+    if args.lit:
+        unknown = [n for n in args.lit if n not in LITERATURE]
+        if unknown:
+            ap.error(f"--lit {', '.join(unknown)}: unknown; choose from "
+                     f"{', '.join(LITERATURE)}")
+        args.lit = list(dict.fromkeys(args.lit))
+    if args.joint and len(args.redshifts) < 2:
+        # One bin: nothing to evolve. Run the ordinary single-z fit.
+        print(f"--joint with one bin (z = {args.redshifts[0]:g}): fitting it "
+              "without redshift evolution (the single-z fit)"
+              + ("; --no-evolve ignored" if args.no_evolve else ""))
+        args.joint, args.no_evolve = False, []
+    if args.no_evolve and not args.joint:
+        ap.error("--no-evolve only applies to --joint fits")
     return args
 
 
@@ -1602,17 +2211,21 @@ def run_redshift(args):
     print(f"Fitting {dataset.data.size} of {len(data_all['MUV'])} UVLF bins "
           f"(M_UV <= {args.muv_max}), model bin-averaged over "
           f"dMUV = {dataset.dMUV:g} mag")
+    lit = literature_sets(args.lit, z, args.muv_max)
 
     params = build_parameters(shuntov, spec)
     record = params_record(params, spec, z, args.shuntov)
-    settings = run_settings(args, params, dataset)
+    settings = {**run_settings(args, params, dataset),
+                **literature_settings(lit)}
     data_rec = data_record(data_fit, args.muv_max)
     if args.outdir is None:
-        print(f"Choosing the output folder in {OUTPUT_ROOT}:")
-        fixed_dir, how = choose_outdir(OUTPUT_ROOT, spec, record, z,
+        root = output_root([d["name"] for _, d in lit])
+        print(f"Choosing the output folder in {root}:")
+        fixed_dir, how = choose_outdir(root, spec, record, z,
                                        args.shuntov)
         print(f"  using {fixed_dir.name} ({how})")
-        args.outdir, how = choose_run_dir(fixed_dir, z, settings, data_rec)
+        args.outdir, how = choose_run_dir(fixed_dir, z_folder(z), settings,
+                                          data_rec)
         print(f"  using {args.outdir.name} ({how})")
     args.outdir.mkdir(parents=True, exist_ok=True)
     print(f"Output folder: {args.outdir}")
@@ -1624,17 +2237,36 @@ def run_redshift(args):
             "another --outdir (or omit it to choose a folder automatically).")
     write_params(params_path, record, nwalkers=args.nwalkers)
     write_data(params_path, data_rec)
+    write_literature(params_path, lit)
     print(f"Fixed parameter values, priors, nwalkers and the "
-          f"{len(data_rec['MUV'])} fitted data points saved to {params_path}")
+          f"{len(data_rec['MUV'])} fitted data points saved to {params_path}"
+          + (" (literature points: group literature)" if lit else ""))
     like = GaussianLikelihood(
-        [dataset], ModelParametrization("fixed_z", params),
-        hmf_points=args.hmf_points)
-    print(f"Log-likelihood at {ref} values:", like.check(shuntov))
+        [dataset] + [ds for ds, _ in lit],
+        ModelParametrization("fixed_z", params), hmf_points=args.hmf_points)
+    ctx = dict(args=args, shuntov=shuntov, ref=ref, like=like, spec=spec,
+               dataset=dataset, data_all=data_all, params=params, lit=lit)
+    return run_chain(
+        args, params, like, settings, ref, shuntov,
+        plot_paths=[args.outdir / f"{kind}.pdf" for kind in PLOT_KINDS],
+        plot_fn=lambda result, burnin, ck: make_plots(
+            result, burnin, ck, ctx, n_draws=args.plot_draws)[1])
 
+
+def run_chain(args, params, like, settings, ref, ref_named, plot_paths,
+              plot_fn):
+    """Sample (or resume) the chain in ``args.outdir``, then write the fit
+    and plots. Shared by the single-redshift and joint fits.
+
+    ``ref_named`` is the reference (Shuntov+25) parameter dict whose
+    log-likelihood is printed; ``plot_fn(result, burnin, checkpoint)`` makes
+    the plots (``plot_paths``) and returns :func:`plot_convergence`'s summary.
+    Returns how the posterior was obtained (see :func:`run_redshift`).
+    """
+    print(f"Log-likelihood at {ref} values:", like.check(ref_named))
+    params_path = args.outdir / "params.h5"
     converge = not args.no_converge
     checkpoint = args.outdir / "chain.h5"
-    ctx = dict(args=args, shuntov=shuntov, ref=ref, like=like, spec=spec,
-               dataset=dataset, data_all=data_all, params=params)
     start_step, already_converged = prepare_checkpoint(
         checkpoint, settings, params.ndim)
     remaining = args.nsteps - start_step
@@ -1743,22 +2375,20 @@ def run_redshift(args):
         print("Converged (autocorrelation criterion met).")
 
     gof = goodness_of_fit(like.chi2(result.median_params()),
-                          dataset.data.size, len(result.names))
+                          like.ndata, len(result.names))
     print(f"At the posterior median: chi2 = {gof['chi2']:.2f} for "
-          f"{dataset.data.size} points - {len(result.names)} free = "
+          f"{like.ndata} points - {len(result.names)} free = "
           f"{gof['dof']} dof; reduced chi2 = {gof['chi2_red']:.2f}; "
           f"p-value = {gof['p_value']:.3g} ({gof['n_sigma']:.1f} sigma)")
 
     # ---- the plots -------------------------------------------------------
-    plot_paths = [args.outdir / f"{kind}.pdf" for kind in PLOT_KINDS]
     if (source == "converged" and not args.replot
             and all(p.exists() for p in plot_paths)):
         print("Checkpoint already converged and its plots exist: not "
               "remaking them (use --replot to force).")
         return source
     print("Making plots...", flush=True)
-    gof, conv = make_plots(result, ex["burnin"], checkpoint, ctx,
-                           n_draws=args.plot_draws)
+    conv = plot_fn(result, ex["burnin"], checkpoint)
     print(f"Convergence: N/(50 tau_max) = {conv['length_ratio']:.2f} "
           f"(need > 1), max dtau/tau = {conv['dtau']:.3f} (need < 0.01)")
     print("Saved " + ", ".join(str(p) for p in plot_paths))
@@ -1770,6 +2400,16 @@ def main():
 
     args = parse_args()
     zs = args.redshifts
+    if args.joint:
+        _sigterm_to_keyboardinterrupt()
+        try:
+            status = run_joint(args)
+        except KeyboardInterrupt:
+            status = "interrupted"
+            print("\nInterrupted outside sampling: no fit written.")
+        if status in ("interrupted", "empty"):
+            sys.exit(130)
+        return
     # Ctrl-C and kill (SIGTERM) both arrive as KeyboardInterrupt. During
     # sampling run_redshift catches it and still writes that bin's fit and
     # plots; either way the remaining bins are skipped and we exit with 130.
