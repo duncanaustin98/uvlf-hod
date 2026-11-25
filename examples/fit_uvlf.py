@@ -71,7 +71,9 @@ fixed=..._shuntov25_<shuntov>[_const=<no-evolve names>]/z=7+8+...[_n]/``:
 chain.h5, params.h5 (with ``model``, ``z_pivot`` and the redshift of every
 fitted point), convergence.log/.pdf, corner.pdf (red: a power-law
 approximation of Shuntov+25 over the fitted z), params_vs_z.pdf (each
-evolving parameter against z, with the total chi^2) and, per bin, ``z=<z>/``
+evolving parameter against z, with the total chi^2), combined_z.pdf (every
+bin overlaid, coloured by z: UVLF with data, SFE, M_UV-Mhalo and bias) and,
+per bin, ``z=<z>/``
 with the single-z UVLF, SFE, M_UV-Mhalo and bias plots (chi^2 there is per
 bin over all its points, as the free parameters are shared).
 
@@ -360,6 +362,8 @@ def read_params(path):
 
     def plain(v):
         v = v.decode() if isinstance(v, bytes) else v
+        if isinstance(v, np.ndarray) and v.ndim > 0:   # e.g. a joint fit's z
+            return v.tolist()
         return v.item() if hasattr(v, "item") else v
 
     with h5py.File(path, "r") as f:
@@ -545,9 +549,7 @@ def model_uvlf(obs, parametrization, named, z, muv, dmuv=BIN_WIDTH):
 # traces (display only: they are sampled, and their priors defined, in linear
 # space, and tau is estimated on the sampled values).
 LOG10_DISPLAY = {"eps0": r"$\log_{10}\,\epsilon_0$",
-                 "sigma_UV": r"$\log_{10}\,\sigma_{\rm UV}$",
-                 "eps0_0": r"$\log_{10}\,\epsilon_0\,|_{z_p}$",
-                 "sigma_UV_0": r"$\log_{10}\,\sigma_{\rm UV}\,|_{z_p}$"}
+                 "eps0_0": r"$\log_{10}\,\epsilon_0\,|_{z_p}$"}
 
 
 def fixed_lines(spec, shuntov, ref):
@@ -1843,7 +1845,7 @@ def plot_params_vs_z(result, like, zs, source, ref, path, n_draws=200,
                 va="top", fontsize=10,
                 bbox=dict(boxstyle="round", fc="white", ec="0.7"))
         ax.set_ylabel(LABELS[sample])
-        if sample in LOG10_DISPLAY:   # eps0, sigma_UV: log axis, as corner
+        if sample in LOG10_DISPLAY:   # eps0: log axis, as in the corner
             ax.set_yscale("log")
         ax.set_xlabel("$z$")
         ax.set_xlim(z_grid[0], z_grid[-1])
@@ -1863,9 +1865,165 @@ def plot_params_vs_z(result, like, zs, source, ref, path, n_draws=200,
     plt.close(fig)
 
 
+def redshift_colours(zs):
+    """One colour per redshift bin, ordered dark (lowest z) to light:
+    ``cividis`` over [0, 0.75]. For the six EPOCHS-v2 bins adjacent colours
+    differ by OKLab dE >= 10 and the lightest keeps 2:1 contrast on white;
+    cividis is built for colour-vision deficiency, and its monotonic
+    lightness reads as an order."""
+    cmap = matplotlib.colormaps["cividis"]
+    return [cmap(x) for x in np.linspace(0.0, 0.75, len(zs))]
+
+
+def plot_combined_z(result, like, zs, datasets, data_all, lit, muv_max,
+                    path, n_draws=200, seed=0, grid_step=0.1):
+    """Every redshift bin of a joint fit overlaid, coloured by z.
+
+    Four panels: (a) the UVLF with the data (EPOCHS-v2 filled where fitted,
+    open where not; literature sets with their own markers); (b) SFE(Mh);
+    (c) mean M_UV(Mh); (d) the galaxy bias in M_UV bins of the EPOCHS-v2
+    width. Each shows the posterior median and 16-84% band per bin, from the
+    same draws as the single-bin plots. ``lit`` is ``{z: [(Dataset, data
+    dict), ...]}``.
+    """
+    par = like.parametrization
+    draws = posterior_draws(result, n_draws, seed)
+    median = result.median_params()
+    colours = redshift_colours(zs)
+    lit_points = [d for z in zs for _, d in lit.get(z, [])]
+    bright = min([-23.5] + [float(np.min(d["MUV"] - d["dMUV"] / 2)) - 0.2
+                            for d in lit_points])
+    muv_grid = np.arange(np.floor(bright * 2) / 2, -16.5 + grid_step / 2,
+                         grid_step)
+
+    def band(curves):
+        return np.nanpercentile(np.asarray(curves, float), [16, 84], axis=0)
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    ax_lf, ax_sfe, ax_muv, ax_b = axes.flat
+    phi_ranges, muv_ranges, sfe_ranges = [], [], []
+    for z, colour, dataset in zip(zs, colours, datasets):
+        print(f"  combined plot: z = {z:g}", flush=True)
+        obs = plot_observables(like, z)
+        zlo, zhi = ZBIN_EDGES[z]
+        label = rf"$z = {z:g}$ (${zlo:g}$-${zhi:g}$)"
+
+        # (a) UVLF
+        lo, hi = band([model_uvlf(obs, par, d, z, muv_grid) for d in draws])
+        ax_lf.fill_between(muv_grid, lo, hi, color=colour, alpha=0.15, lw=0)
+        ax_lf.plot(muv_grid, model_uvlf(obs, par, median, z, muv_grid),
+                   color=colour, lw=2, label=label)
+        d_all = data_all[z]
+        fit = (d_all["MUV"] <= muv_max if muv_max is not None
+               else np.ones(len(d_all["MUV"]), bool))
+        for sel, mfc in ((fit, colour), (~fit, "white")):
+            if sel.any():
+                ax_lf.errorbar(d_all["MUV"][sel], d_all["phi"][sel],
+                               yerr=[d_all["phi_err_low"][sel],
+                                     d_all["phi_err_upp"][sel]],
+                               fmt="o", color=colour, mfc=mfc, ms=6,
+                               mec=colour, capsize=0, lw=1, zorder=5)
+        phi_ranges.append(d_all["phi"])
+        for ds, d in lit.get(z, []):
+            style = LIT_STYLES.get(d["name"], dict(fmt="s"))
+            ax_lf.errorbar(d["MUV"], d["phi"],
+                           yerr=[d["phi_err_low"], d["phi_err_upp"]],
+                           fmt=style["fmt"], color=colour, mfc=colour,
+                           mec="k", ms=7, capsize=0, lw=1, zorder=6)
+            phi_ranges.append(d["phi"])
+
+        # (b) SFE and (c) M_UV against halo mass
+        sfe = halo_relation(result, like, median, z,
+                            lambda m, Mh: m.star_formation_efficiency(Mh),
+                            n_draws, seed)
+        muv = halo_relation(result, like, median, z,
+                            lambda m, Mh: m.MUV(Mh), n_draws, seed)
+        for ax, rel in ((ax_sfe, sfe), (ax_muv, muv)):
+            ax.fill_between(LOG10_MH_GRID, rel["lo"], rel["hi"],
+                            color=colour, alpha=0.15, lw=0)
+            ax.plot(LOG10_MH_GRID, rel["median"], color=colour, lw=2)
+        sfe_ranges.append(sfe["median"])
+        muv_ranges.append(fitted_muv_range(
+            [dataset] + [ds for ds, _ in lit.get(z, [])]))
+
+        # (d) galaxy bias in M_UV bins
+        def binned(named):
+            b = obs.galaxy_bias(muv_grid, BIN_WIDTH,
+                                **par.params_for_redshift(named, z))
+            return np.where(b > 0, b, np.nan)   # 0 = no galaxies in the bin
+        lo, hi = band([binned(d) for d in draws])
+        ax_b.fill_between(muv_grid, lo, hi, color=colour, alpha=0.15, lw=0)
+        ax_b.plot(muv_grid, binned(median), color=colour, lw=2)
+
+    # (a) axes, z legend and a marker key for the data
+    phi_all = np.concatenate(phi_ranges)
+    ax_lf.set_yscale("log")
+    ax_lf.set_ylim(0.2 * phi_all.min(), 5 * phi_all.max())
+    ax_lf.set_xlim(muv_grid[0], muv_grid[-1])
+    ax_lf.set_xlabel(r"$M_{\rm UV}$")
+    ax_lf.set_ylabel(r"$\Phi\ [{\rm Mpc^{-3}\,mag^{-1}}]$")
+    ax_lf.set_title("(a) UV luminosity function", fontsize=11, loc="left")
+    z_legend = ax_lf.legend(loc="lower right", fontsize=9, title="bin",
+                            title_fontsize=9)
+    ax_lf.add_artist(z_legend)
+    from matplotlib.lines import Line2D
+    key = [Line2D([], [], ls="none", marker="o", color="0.3", ms=6,
+                  label="EPOCHS-v2 (fitted)"),
+           Line2D([], [], ls="none", marker="o", color="0.3", mfc="white",
+                  ms=6, label="EPOCHS-v2 (not fitted)")]
+    for name in dict.fromkeys(d["name"] for d in lit_points):
+        key.append(Line2D([], [], ls="none", color="0.3", mec="k", ms=7,
+                          marker=LIT_STYLES.get(name, dict(fmt="s"))["fmt"],
+                          label=name))
+    ax_lf.legend(handles=key, loc="upper left", fontsize=9)
+    if muv_max is not None:
+        ax_lf.axvline(muv_max + BIN_WIDTH / 2, color="0.4", ls=":", lw=1)
+
+    # (b) SFE
+    sfe_all = np.concatenate(sfe_ranges)
+    ax_sfe.set_yscale("log")
+    ax_sfe.set_ylim(max(1e-4, 0.5 * sfe_all.min()), 3 * sfe_all.max())
+    ax_sfe.set_xlim(LOG10_MH_GRID[0], LOG10_MH_GRID[-1])
+    ax_sfe.set_xlabel(r"$\log_{10}(M_{\rm h}/M_\odot)$")
+    ax_sfe.set_ylabel(r"$\epsilon(M_{\rm h}) = {\rm SFR}\,/\,"
+                      r"(f_{\rm b}\,\dot M_{\rm h})$")
+    ax_sfe.set_title("(b) star-formation efficiency", fontsize=11,
+                     loc="left")
+
+    # (c) M_UV - Mh: y range covers every bin's fitted magnitudes
+    bright_fit = min(r[0] for r in muv_ranges)
+    faint_fit = max(r[1] for r in muv_ranges)
+    ax_muv.set_ylim(faint_fit + 4, bright_fit - 1)   # brighter up
+    ax_muv.set_xlim(LOG10_MH_GRID[0], LOG10_MH_GRID[-1])
+    ax_muv.set_xlabel(r"$\log_{10}(M_{\rm h}/M_\odot)$")
+    ax_muv.set_ylabel(r"$\langle M_{\rm UV}\rangle(M_{\rm h})$ "
+                      "(dust attenuated)")
+    ax_muv.set_title(r"(c) mean $M_{\rm UV}$ of centrals", fontsize=11,
+                     loc="left")
+
+    # (d) bias
+    ax_b.set_xlim(muv_grid[0], muv_grid[-1])
+    ax_b.set_xlabel(r"$M_{\rm UV}$ (bin of width "
+                    rf"$\Delta M_{{\rm UV}}={BIN_WIDTH:g}$)")
+    ax_b.set_ylabel(r"galaxy bias $b_{\rm g}$")
+    ax_b.set_title(r"(d) galaxy bias $b_{\rm g}(M_{\rm UV})$", fontsize=11,
+                   loc="left")
+    if muv_max is not None:
+        ax_b.axvline(muv_max + BIN_WIDTH / 2, color="0.4", ls=":", lw=1)
+    for ax in axes.flat:
+        ax.grid(color="0.93", lw=0.6)
+
+    fig.suptitle("EPOCHS-v2 UVLF joint fit" + literature_line(
+        [(None, d) for d in lit_points]).replace("\n", " ")
+        + ": posterior median and 16-84% per redshift bin", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
 def joint_plot_paths(outdir, zs):
     return ([outdir / f"{k}.pdf" for k in ("corner", "params_vs_z",
-                                           "convergence")]
+                                           "combined_z", "convergence")]
             + [outdir / z_folder(z) / f"{k}.pdf"
                for z in zs for k in JOINT_PLOT_KINDS])
 
@@ -1891,6 +2049,9 @@ def make_joint_plots(result, burnin, chain_source, ctx):
     plot_params_vs_z(result, like, zs, source, ref,
                      a.outdir / "params_vs_z.pdf", n_draws=a.plot_draws,
                      seed=a.seed, gof=gof)
+    plot_combined_z(result, like, zs, ctx["datasets"], ctx["data_all"],
+                    ctx["lit"], a.muv_max, a.outdir / "combined_z.pdf",
+                    n_draws=a.plot_draws, seed=a.seed)
     common = dict(n_draws=a.plot_draws, seed=a.seed, spec=spec, ref=ref)
     for z, dataset in zip(zs, ctx["datasets"]):
         print(f"  plots of z = {z:g}", flush=True)

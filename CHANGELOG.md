@@ -64,8 +64,8 @@
   galfind does: tau is the largest autocorrelation time (N/50 if emcee
   cannot yet estimate it), and the first 2 tau steps are dropped and the rest
   thinned by tau/2. The corner plot reports N_walkers, N_steps and
-  N_steps/(50 tau_max). eps0 and sigma_UV are shown as log10 in the corner
-  plot and the walker traces (they are still sampled linearly). `--z` takes
+  N_steps/(50 tau_max). eps0 is shown as log10 in the corner
+  plot and the walker traces (it is still sampled linearly). `--z` takes
   several bins (or `all`) and fits them in turn; an interrupt writes the
   current bin's fit and plots, skips the rest and exits with status 130. Walkers
   move with emcee's differential-evolution proposals by default (`--moves de`;
@@ -90,8 +90,9 @@
   each free parameter evolving as a power law normalised at `--z-pivot`
   (default 7). `--no-evolve NAME` keeps a free parameter constant in z.
   Fixed parameters follow Shuntov+25. Outputs go to
-  `EPOCHS_DR2_UVLF/joint_powerlaw/`, with a parameters-vs-z plot and the
-  single-z plots of every bin. `--joint` with a single bin runs the ordinary single-z fit.
+  `EPOCHS_DR2_UVLF/joint_powerlaw/`, with a parameters-vs-z plot, a plot
+  overlaying every bin (`combined_z.pdf`: UVLF with data, SFE, M_UV-Mhalo
+  and bias, coloured by z) and the single-z plots of every bin. `--joint` with a single bin runs the ordinary single-z fit.
 - `examples/fit_uvlf.py --lit [NAME ...]`: also fits literature UVLFs, by
   default the bright-end Bowler+17, Varadaraj+23 and Varadaraj+26 points at
   z=7 (copied from flags_data into `examples/literature_data/`, loader
