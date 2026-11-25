@@ -105,6 +105,7 @@ docs/_autosummary/
 # Local tooling and run outputs
 .claude/
 examples/tutorial_chains/
+examples/outputs/
 chain*.npz
 
 # Apptainer image and build log (rebuild from container/halogal.def)

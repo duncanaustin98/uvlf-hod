@@ -665,6 +665,37 @@ class BaseHODModel(HMRModel):
         against (e.g. M_UV or log10 Mstar).
         """
 
+    def _selection_state(self):
+        """Everything the selection variable can depend on (cache key):
+        the value of every parameter plus the model settings."""
+        params = tuple((n, getattr(self, n)) for n in self.param_names()
+                       if hasattr(self, n))
+        return params + tuple(sorted(self._settings().items()))
+
+    def _cached_selection_variable(self, Mh):
+        """:meth:`_selection_variable`, memoized on parameters and ``Mh``.
+
+        An abundance or bias integral evaluates the occupation at several
+        thresholds (two per magnitude bin, for centrals and again for
+        satellites) on the same halo-mass grid with the same parameters,
+        but the selection variable (e.g. M_UV(Mh), with its iterative dust
+        correction) depends on neither. It is recomputed only when a
+        parameter, a setting or the mass grid changes, including parameters
+        set directly as attributes. The cached array is returned read-only.
+        """
+        Mh_key = np.asarray(Mh, dtype=float)
+        state = self._selection_state()
+        cache = getattr(self, "_selvar_cache", None)
+        if (cache is not None and cache[0] == state
+                and cache[1].shape == Mh_key.shape
+                and np.array_equal(cache[1], Mh_key)):
+            return cache[2]
+        value = self._selection_variable(Mh)
+        if isinstance(value, np.ndarray):
+            value.flags.writeable = False
+        self._selvar_cache = (state, Mh_key.copy(), value)
+        return value
+
     def Ncen(self, Mh, thresh):
         """Central galaxy occupation function.
 
@@ -688,7 +719,7 @@ class BaseHODModel(HMRModel):
         N_cen : float or ndarray
             Average number of central galaxies
         """
-        x_mean = self._selection_variable(Mh)
+        x_mean = self._cached_selection_variable(Mh)
         return 0.5 * (1 + erf(self._selection_sign * (x_mean - thresh) /
                               (np.sqrt(2) * self._sigma)))
 

@@ -18,6 +18,11 @@ a 1-D ``sigma`` is given it is promoted to a diagonal covariance -- the
 covariance path is the same either way, so a full covariance (e.g. a jackknife
 estimate for clustering) can be supplied later without code changes. The
 Cholesky factor and Gaussian normalisation constant are cached at construction.
+
+Asymmetric (upper/lower) errors are supported through a *split-normal*
+likelihood: pass ``sigma_low`` and ``sigma_upp`` instead of ``sigma``/``cov``.
+Each point then uses ``sigma_low`` when the model lies below the datum and
+``sigma_upp`` when it lies above (see :meth:`Dataset.chi2`).
 """
 
 import numpy as np
@@ -30,12 +35,42 @@ __all__ = ["Dataset"]
 _KINDS = ("uvlf", "clustering", "number_density")
 
 
-def _build_covariance(n, cov, sigma):
-    """Return an (n, n) covariance from either ``cov`` or a 1-D ``sigma``."""
-    if cov is not None and sigma is not None:
-        raise ValueError("Provide either 'cov' or 'sigma', not both")
-    if cov is None and sigma is None:
-        raise ValueError("One of 'cov' or 'sigma' is required")
+def _check_sigma(name, sigma, n):
+    """Validate a 1-D error array of length ``n``; return it as floats."""
+    sigma = np.atleast_1d(np.asarray(sigma, dtype=float))
+    if sigma.shape != (n,):
+        raise ValueError(f"{name} has length {sigma.shape}, expected ({n},)")
+    if not (np.all(np.isfinite(sigma)) and np.all(sigma > 0)):
+        raise ValueError(f"{name} must be finite and strictly positive")
+    return sigma
+
+
+def _build_covariance(n, cov, sigma, sigma_low=None, sigma_upp=None):
+    """Return ``(cov, sigma_low, sigma_upp)`` from exactly one error spec.
+
+    ``cov`` is an (n, n) covariance, ``sigma`` 1-D symmetric errors, and
+    ``sigma_low``/``sigma_upp`` (given together) 1-D asymmetric errors. For the
+    asymmetric case the returned covariance is ``diag(((lo + hi) / 2)**2)``,
+    whose Gaussian normalisation equals that of the split-normal density; the
+    returned ``sigma_low``/``sigma_upp`` are None otherwise.
+    """
+    asym = sigma_low is not None or sigma_upp is not None
+    if asym and (sigma_low is None or sigma_upp is None):
+        raise ValueError("'sigma_low' and 'sigma_upp' must be given together")
+    n_given = sum([cov is not None, sigma is not None, asym])
+    if n_given > 1:
+        raise ValueError(
+            "Provide exactly one of 'cov', 'sigma', or "
+            "'sigma_low'/'sigma_upp'"
+        )
+    if n_given == 0:
+        raise ValueError(
+            "One of 'cov', 'sigma', or 'sigma_low'/'sigma_upp' is required"
+        )
+    if asym:
+        lo = _check_sigma("sigma_low", sigma_low, n)
+        hi = _check_sigma("sigma_upp", sigma_upp, n)
+        return np.diag((0.5 * (lo + hi)) ** 2), lo, hi
     if cov is not None:
         cov = np.atleast_2d(np.asarray(cov, dtype=float))
         if cov.shape != (n, n):
@@ -46,13 +81,9 @@ def _build_covariance(n, cov, sigma):
             raise ValueError("cov contains non-finite values")
         if not np.allclose(cov, cov.T, rtol=1e-8, atol=0.0):
             raise ValueError("cov must be symmetric")
-        return cov
-    sigma = np.atleast_1d(np.asarray(sigma, dtype=float))
-    if sigma.shape != (n,):
-        raise ValueError(f"sigma has length {sigma.shape}, expected ({n},)")
-    if not (np.all(np.isfinite(sigma)) and np.all(sigma > 0)):
-        raise ValueError("sigma must be finite and strictly positive")
-    return np.diag(sigma ** 2)
+        return cov, None, None
+    sigma = _check_sigma("sigma", sigma, n)
+    return np.diag(sigma ** 2), None, None
 
 
 class Dataset:
@@ -62,7 +93,8 @@ class Dataset:
     :meth:`number_density` rather than instantiating directly.
     """
 
-    def __init__(self, kind, z, data, cov=None, sigma=None, label=None):
+    def __init__(self, kind, z, data, cov=None, sigma=None, label=None,
+                 sigma_low=None, sigma_upp=None):
         if kind not in _KINDS:
             raise ValueError(f"kind must be one of {_KINDS}, got {kind!r}")
         self.kind = kind
@@ -77,7 +109,9 @@ class Dataset:
             )
         self.label = label or f"{kind}_z{z:g}"
 
-        self.cov = _build_covariance(self.data.size, cov, sigma)
+        self.cov, self.sigma_low, self.sigma_upp = _build_covariance(
+            self.data.size, cov, sigma, sigma_low, sigma_upp
+        )
         # Cache Cholesky factor and the Gaussian normalisation constant.
         try:
             self._cho = cho_factor(self.cov)
@@ -94,12 +128,14 @@ class Dataset:
         self.MUV_thresh1 = None
         self.MUV_thresh2 = 0.0
         self.corr_kwargs = {}
+        self.dMUV = None
 
     # ------------------------------------------------------------------
     # Constructors
     # ------------------------------------------------------------------
     @classmethod
-    def uvlf(cls, z, MUV, phi, cov=None, sigma=None, label=None):
+    def uvlf(cls, z, MUV, phi, cov=None, sigma=None, label=None,
+             sigma_low=None, sigma_upp=None, dMUV=None):
         """UV luminosity function data.
 
         Parameters
@@ -111,14 +147,43 @@ class Dataset:
         phi : array_like
             Measured Phi(M_UV) in Mpc^-3 mag^-1.
         cov, sigma : array_like, optional
-            Covariance (n, n) or 1-D Gaussian errors. Exactly one required.
+            Covariance (n, n) or 1-D Gaussian errors.
         label : str, optional
             Human-readable label.
+        sigma_low, sigma_upp : array_like, optional
+            1-D lower and upper errors on ``phi`` for a split-normal
+            likelihood (given together). Exactly one of ``cov``, ``sigma``, or
+            the ``sigma_low``/``sigma_upp`` pair is required.
+        dMUV : float or array_like, optional
+            Width [mag] of the magnitude bin centred on each ``MUV``: a scalar
+            for uniform bins or one value per point. The model is then the
+            bin-averaged Phi over ``[MUV - dMUV/2, MUV + dMUV/2]``, which is
+            what a binned (e.g. 1/Vmax) UVLF measures. Pass the data's true
+            bin width; do not infer it from adjacent points, since empty bins
+            dropped from the data make that difference too large. Default
+            None uses ``Observables.luminosity_function``'s narrow default
+            (0.05 mag), i.e. effectively Phi at the bin centre.
         """
-        obj = cls("uvlf", z, phi, cov=cov, sigma=sigma, label=label)
+        obj = cls("uvlf", z, phi, cov=cov, sigma=sigma, label=label,
+                  sigma_low=sigma_low, sigma_upp=sigma_upp)
         obj.x = np.atleast_1d(np.asarray(MUV, dtype=float))
         if obj.x.shape != obj.data.shape:
             raise ValueError("MUV and phi must have the same length")
+        if dMUV is not None:
+            dMUV = np.asarray(dMUV, dtype=float)
+            if dMUV.ndim == 1 and dMUV.shape != obj.x.shape:
+                raise ValueError(
+                    f"dMUV has length {dMUV.shape}, expected a scalar or "
+                    f"{obj.x.shape}"
+                )
+            if dMUV.ndim > 1 or not (np.all(np.isfinite(dMUV))
+                                     and np.all(dMUV > 0)):
+                raise ValueError(
+                    "dMUV must be a finite, strictly positive scalar or 1-D "
+                    "array"
+                )
+            dMUV = float(dMUV) if dMUV.ndim == 0 else dMUV
+        obj.dMUV = dMUV
         return obj
 
     @classmethod
@@ -246,9 +311,18 @@ class Dataset:
             Model vector, same length as ``self.data``.
         """
         if self.kind == "uvlf":
-            return np.atleast_1d(
-                observables.luminosity_function(self.x, **model_params)
-            )
+            if self.dMUV is None:
+                return np.atleast_1d(
+                    observables.luminosity_function(self.x, **model_params)
+                )
+            if np.ndim(self.dMUV) == 0:
+                return np.atleast_1d(observables.luminosity_function(
+                    self.x, self.dMUV, **model_params))
+            # per-point bin widths: one bin-averaged evaluation per point
+            return np.array([
+                observables.luminosity_function(x, dm, **model_params)[0]
+                for x, dm in zip(self.x, self.dMUV)
+            ])
         if self.kind == "number_density":
             n = observables.number_density(self.MUV_thresh1, **model_params)
             return np.atleast_1d(n)
@@ -267,13 +341,45 @@ class Dataset:
             )
         raise RuntimeError(f"Unknown kind {self.kind!r}")  # pragma: no cover
 
-    def chi2(self, model):
-        """Generalised chi-square ``r^T C^-1 r`` for a model vector."""
+    @property
+    def is_asymmetric(self):
+        """Whether this dataset uses split-normal (asymmetric) errors."""
+        return self.sigma_low is not None
+
+    def effective_sigma(self, model):
+        """Per-point error actually used against ``model``.
+
+        For split-normal data this is ``sigma_low`` where the model lies below
+        the datum (``data - model > 0``) and ``sigma_upp`` otherwise; for
+        symmetric data it is ``sqrt(diag(cov))``.
+        """
+        if not self.is_asymmetric:
+            return np.sqrt(np.diag(self.cov))
         r = self.data - np.asarray(model, dtype=float)
+        return np.where(r > 0, self.sigma_low, self.sigma_upp)
+
+    def chi2(self, model):
+        """Generalised chi-square for a model vector.
+
+        ``r^T C^-1 r`` with ``r = data - model``. For split-normal data the
+        points are independent and ``chi2 = sum((r / s)**2)`` with ``s`` from
+        :meth:`effective_sigma` -- the same side convention as galfind's
+        ``MCMC_Fitter`` (lower error when the model is below the datum).
+        """
+        r = self.data - np.asarray(model, dtype=float)
+        if self.is_asymmetric:
+            return float(np.sum((r / self.effective_sigma(model)) ** 2))
         return float(r @ cho_solve(self._cho, r))
 
     def log_likelihood(self, model):
-        """Gaussian log-likelihood (with normalisation) for a model vector."""
+        """Gaussian log-likelihood (with normalisation) for a model vector.
+
+        For split-normal data the normalisation is the proper split-normal
+        constant ``sum(log(sqrt(2/pi) / (sigma_low + sigma_upp)))``, which is
+        independent of the model, so the likelihood is continuous where the
+        model crosses a datum. (galfind instead adds a per-point
+        ``log(s**2)`` that jumps at that crossing.)
+        """
         return self._lognorm - 0.5 * self.chi2(model)
 
     def __repr__(self):

@@ -384,3 +384,68 @@ class TestMstarObservables:
     def test_mean_halo_mass_and_bias_grow_with_stellar_mass(self, mobs):
         assert mobs.mean_halo_mass(10.0) > mobs.mean_halo_mass(9.0)
         assert mobs.mean_bias(10.0) > mobs.mean_bias(9.0)
+
+
+# --------------------------------------------------------------------------
+# Selection-variable cache (M_UV(Mh) / log Mstar(Mh) computed once per
+# parameter set and mass grid)
+# --------------------------------------------------------------------------
+class TestSelectionVariableCache:
+    @staticmethod
+    def _uncached(monkeypatch):
+        from halogal.model import BaseHODModel
+        monkeypatch.setattr(BaseHODModel, "_cached_selection_variable",
+                            lambda self, Mh: self._selection_variable(Mh))
+
+    @pytest.mark.parametrize("cls, x", [
+        (UVHODModel, np.linspace(-23, -16, 8)),
+        (MstarHODModel, np.linspace(7.5, 11, 6)),
+    ])
+    def test_abundance_identical_to_uncached(self, monkeypatch, cls, x):
+        kw = dict(eps0=0.12, Mc=3e11, a=0.8)
+        cached = Observables(cls(z=8.0)).abundance_function(x, 0.5, **kw)
+        self._uncached(monkeypatch)
+        ref = Observables(cls(z=8.0)).abundance_function(x, 0.5, **kw)
+        assert np.array_equal(cached, ref)
+
+    def test_ffb_model_identical_to_uncached(self, monkeypatch):
+        from halogal import UVHODModel_FFB
+        x = np.linspace(-23, -16, 8)
+        kw = dict(eps_max_ffb=0.6, ffb_delta=0.2)
+        cached = Observables(UVHODModel_FFB(z=10.0)).abundance_function(
+            x, 0.5, **kw)
+        self._uncached(monkeypatch)
+        ref = Observables(UVHODModel_FFB(z=10.0)).abundance_function(
+            x, 0.5, **kw)
+        assert np.array_equal(cached, ref)
+
+    def test_computed_once_per_parameter_set(self, monkeypatch):
+        m = UVHODModel(z=7.0)
+        calls = []
+        orig = type(m)._selection_variable
+        monkeypatch.setattr(type(m), "_selection_variable",
+                            lambda self, Mh: calls.append(1) or orig(self, Mh))
+        Mh = np.logspace(9, 13, 50)
+        for thresh in (-21, -20, -19):
+            m.Ngal(Mh, thresh)
+        assert len(calls) == 1
+
+    def test_invalidated_by_any_change(self):
+        m = UVHODModel(z=7.0)
+        Mh = np.logspace(9, 13, 50)
+        base = m.Ncen(Mh, -19).copy()
+        m.update_parameters(eps0=0.5)
+        assert not np.array_equal(m.Ncen(Mh, -19), base)
+        m.eps0 = DEFAULT_HOD_PARAMS["eps0"]          # direct attribute
+        assert np.array_equal(m.Ncen(Mh, -19), base)
+        m.add_dust = False                            # setting
+        assert not np.array_equal(m.Ncen(Mh, -19), base)
+        m.add_dust = True
+        assert not np.array_equal(m.Ncen(np.logspace(9.5, 13, 50), -19),
+                                  base)               # new mass grid
+
+    def test_cached_value_is_read_only(self):
+        m = UVHODModel(z=7.0)
+        x = m._cached_selection_variable(np.logspace(9, 13, 10))
+        with pytest.raises(ValueError):
+            x[0] = 0.0

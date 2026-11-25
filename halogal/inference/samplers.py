@@ -30,6 +30,12 @@ _WORKER_STATE = {}
 
 def _init_pool_worker(parameter_set, likelihood):
     """Pool initializer: store and build the likelihood once per worker."""
+    import signal
+
+    # Ctrl-C reaches every process in the group. Let only the main process
+    # handle it: it stops the run and terminates this pool (see
+    # EmceeSampler.run), instead of every worker raising its own traceback.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     _WORKER_STATE["parameter_set"] = parameter_set
     _WORKER_STATE["likelihood"] = likelihood
     likelihood._ensure_setup()  # build the halomod model once in this process
@@ -81,7 +87,8 @@ class EmceeSampler(_BaseSampler):
     def run(self, nwalkers=None, nsteps=2000, processes=None, pool=None,
             progress=True, burnin=None, thin=1, initial=None, seed=None,
             moves=None, backend=None, convergence=False, max_steps=None,
-            check_every=1000, n_tau=50, tau_change=0.01):
+            check_every=1000, n_tau=50, tau_change=0.01, callback=None,
+            callback_every=100):
         """Run the ensemble sampler.
 
         Parameters
@@ -137,6 +144,14 @@ class EmceeSampler(_BaseSampler):
             Require ``chain length > n_tau * tau``. Default 50.
         tau_change : float, optional
             Require the fractional change in ``tau`` below this. Default 0.01.
+        callback : callable, optional
+            Called as ``callback(sampler)`` (the live ``emcee.EnsembleSampler``)
+            every ``callback_every`` steps of the backend's total iteration
+            count, in both modes, in the main process. Use it for progress
+            plots or diagnostics during a long run. Exceptions it raises
+            propagate and stop the run.
+        callback_every : int, optional
+            Steps between ``callback`` calls. Default 100.
 
         Returns
         -------
@@ -206,13 +221,24 @@ class EmceeSampler(_BaseSampler):
                 nwalkers, ndim, log_prob_fn, pool=pool, moves=moves,
                 backend=backend,
             )
+            if callback is not None and not callback_every >= 1:
+                raise ValueError("callback_every must be >= 1")
             if convergence:
                 converged = self._run_to_convergence(
                     sampler, initial, max_steps or nsteps, check_every,
                     n_tau, tau_change, progress,
+                    callback=callback, callback_every=callback_every,
                 )
             else:
-                sampler.run_mcmc(initial, nsteps, progress=progress)
+                # Equivalent to sampler.run_mcmc, but steps through the
+                # generator so the callback can fire.
+                if initial is None:
+                    initial = sampler.get_last_sample()
+                for _ in sampler.sample(initial, iterations=nsteps,
+                                        progress=progress):
+                    if (callback is not None
+                            and sampler.iteration % callback_every == 0):
+                        callback(sampler)
             finished = True
         finally:
             if own_pool is not None:
@@ -278,7 +304,8 @@ class EmceeSampler(_BaseSampler):
 
     @staticmethod
     def _run_to_convergence(sampler, initial, max_steps, check_every,
-                            n_tau, tau_change, progress):
+                            n_tau, tau_change, progress, callback=None,
+                            callback_every=100):
         """Sample until tau is stable (canonical emcee criterion).
 
         Returns True if convergence was reached before ``max_steps``.
@@ -291,6 +318,8 @@ class EmceeSampler(_BaseSampler):
         old_tau = np.inf
         for _ in sampler.sample(initial, iterations=max_steps,
                                 progress=progress):
+            if callback is not None and sampler.iteration % callback_every == 0:
+                callback(sampler)
             if sampler.iteration % check_every:
                 continue
             tau = sampler.get_autocorr_time(tol=0)

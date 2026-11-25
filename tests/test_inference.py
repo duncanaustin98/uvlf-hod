@@ -199,6 +199,88 @@ class TestDataset:
             Dataset.uvlf(z=6, MUV=[-20, -19], phi=[1, 2],
                          sigma=[0.1, 0.1], cov=np.eye(2))
 
+    def test_split_normal_symmetric_limit(self):
+        # sigma_low == sigma_upp reproduces the symmetric Gaussian exactly.
+        MUV = np.array([-20, -19, -18])
+        phi = np.array([1.0, 2.0, 3.0])
+        sig = np.array([0.1, 0.2, 0.3])
+        model = np.array([1.1, 1.8, 3.0])
+        sym = Dataset.uvlf(z=6, MUV=MUV, phi=phi, sigma=sig)
+        asym = Dataset.uvlf(z=6, MUV=MUV, phi=phi, sigma_low=sig, sigma_upp=sig)
+        assert asym.is_asymmetric and not sym.is_asymmetric
+        assert asym.chi2(model) == pytest.approx(sym.chi2(model))
+        assert asym.log_likelihood(model) == pytest.approx(
+            sym.log_likelihood(model))
+
+    def test_split_normal_side_selection(self):
+        # model below the datum -> sigma_low; model above -> sigma_upp.
+        MUV = np.array([-20, -19])
+        phi = np.array([1.0, 1.0])
+        lo = np.array([0.1, 0.1])
+        hi = np.array([0.4, 0.4])
+        ds = Dataset.uvlf(z=6, MUV=MUV, phi=phi, sigma_low=lo, sigma_upp=hi)
+        model = np.array([0.8, 1.2])  # first below, second above
+        assert ds.effective_sigma(model) == pytest.approx([0.1, 0.4])
+        expected = (0.2 / 0.1) ** 2 + (0.2 / 0.4) ** 2
+        assert ds.chi2(model) == pytest.approx(expected)
+        norm = np.sum(np.log(np.sqrt(2.0 / np.pi) / (lo + hi)))
+        assert ds.log_likelihood(model) == pytest.approx(norm - 0.5 * expected)
+
+    def test_split_normal_continuous_at_datum(self):
+        ds = Dataset.uvlf(z=6, MUV=[-20], phi=[1.0],
+                          sigma_low=[0.1], sigma_upp=[0.5])
+        eps = 1e-9
+        assert ds.log_likelihood([1.0 - eps]) == pytest.approx(
+            ds.log_likelihood([1.0 + eps]))
+
+    def test_split_normal_validation(self):
+        MUV, phi = [-20, -19], [1, 2]
+        with pytest.raises(ValueError, match="together"):
+            Dataset.uvlf(z=6, MUV=MUV, phi=phi, sigma_low=[0.1, 0.1])
+        with pytest.raises(ValueError, match="exactly one"):
+            Dataset.uvlf(z=6, MUV=MUV, phi=phi, sigma=[0.1, 0.1],
+                         sigma_low=[0.1, 0.1], sigma_upp=[0.1, 0.1])
+        with pytest.raises(ValueError, match="exactly one"):
+            Dataset.uvlf(z=6, MUV=MUV, phi=phi, cov=np.eye(2),
+                         sigma_low=[0.1, 0.1], sigma_upp=[0.1, 0.1])
+        with pytest.raises(ValueError, match="strictly positive"):
+            Dataset.uvlf(z=6, MUV=MUV, phi=phi,
+                         sigma_low=[0.1, 0.0], sigma_upp=[0.1, 0.1])
+
+    def test_uvlf_bin_width_forwarded(self):
+        # dMUV sets the bin over which the model Phi is averaged.
+        class _Stub:
+            def __init__(self):
+                self.calls = []
+
+            def luminosity_function(self, MUV, dMUV=0.05, **params):
+                self.calls.append(dMUV)
+                return np.full(np.size(MUV), dMUV)
+
+        MUV, phi, sig = [-21.0, -20.5, -20.0], [1.0, 1.0, 1.0], [0.1] * 3
+        stub = _Stub()
+        ds = Dataset.uvlf(z=7, MUV=MUV, phi=phi, sigma=sig)
+        assert ds.predict(stub, {}) == pytest.approx([0.05] * 3)  # default
+        ds = Dataset.uvlf(z=7, MUV=MUV, phi=phi, sigma=sig, dMUV=0.5)
+        assert ds.predict(stub, {}) == pytest.approx([0.5] * 3)
+        ds = Dataset.uvlf(z=7, MUV=MUV, phi=phi, sigma=sig,
+                          dMUV=[0.5, 1.0, 0.25])
+        assert ds.predict(stub, {}) == pytest.approx([0.5, 1.0, 0.25])
+        with pytest.raises(ValueError):
+            Dataset.uvlf(z=7, MUV=MUV, phi=phi, sigma=sig, dMUV=[0.5, 0.5])
+        with pytest.raises(ValueError):
+            Dataset.uvlf(z=7, MUV=MUV, phi=phi, sigma=sig, dMUV=0.0)
+
+    def test_uvlf_bin_average_matches_observables(self):
+        from halogal.model import HODModel, Observables
+        obs = Observables(HODModel(z=7.0))
+        mp = ModelParametrization("fixed_z").params_for_redshift({}, 7.0)
+        MUV = np.array([-21.0, -19.0])
+        ds = Dataset.uvlf(z=7, MUV=MUV, phi=[1e-5, 1e-4], sigma=[1e-6, 1e-5],
+                          dMUV=0.5)
+        expected = obs.luminosity_function(MUV, 0.5, **mp)
+        assert ds.predict(obs, mp) == pytest.approx(expected)
+
     def test_clustering_requires_threshold(self):
         with pytest.raises(ValueError):
             Dataset.clustering(z=6, theta=[1, 2], w=[1, 2], sigma=[1, 1])
@@ -301,6 +383,48 @@ class TestGaussianLikelihoodUVLF:
 # --------------------------------------------------------------------------
 # Samplers (slow)
 # --------------------------------------------------------------------------
+class _ToyLikelihood:
+    """Cheap Gaussian log-likelihood in eps0 (no forward model)."""
+
+    parametrization = ModelParametrization("fixed_z")
+
+    def _ensure_setup(self):
+        pass
+
+    def log_likelihood(self, named):
+        return -0.5 * ((named["eps0"] - 0.2) / 0.05) ** 2
+
+
+class TestEmceeCallback:
+    def _sampler(self):
+        params = ParameterSet([Parameter("eps0", Uniform(0.01, 0.5))])
+        return EmceeSampler(params, _ToyLikelihood())
+
+    def test_callback_every_n_steps_fixed(self):
+        seen = []
+        self._sampler().run(nwalkers=8, nsteps=250, progress=False, seed=0,
+                            callback=lambda s: seen.append(s.iteration),
+                            callback_every=100)
+        assert seen == [100, 200]
+
+    def test_callback_in_convergence_mode_and_resume(self, tmp_path):
+        path = str(tmp_path / "chain.h5")
+        seen = []
+        self._sampler().run(nwalkers=8, nsteps=150, progress=False, seed=0,
+                            backend=path)
+        # resumed run: callback keyed to the backend's total iteration count
+        self._sampler().run(nwalkers=8, max_steps=120, progress=False,
+                            backend=path, convergence=True, check_every=1000,
+                            callback=lambda s: seen.append(s.iteration),
+                            callback_every=100)
+        assert seen == [200]
+
+    def test_bad_callback_every(self):
+        with pytest.raises(ValueError):
+            self._sampler().run(nwalkers=8, nsteps=10, progress=False,
+                                callback=lambda s: None, callback_every=0)
+
+
 class TestSamplers:
     @pytest.mark.slow
     def test_emcee_uvlf_recovery(self):
