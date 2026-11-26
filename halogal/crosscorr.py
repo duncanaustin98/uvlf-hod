@@ -517,7 +517,7 @@ class CrossCorrelation:
         m = self.hod_model
         return (
             m.z, m.eps0, m.Mc, m.a, m.b, m.sigma_UV, m.Mcut, m.Msat, m.asat,
-            m.add_dust, self.R_cs, self.R_sc, self.R_ss,
+            m.dust, m.satellites, self.R_cs, self.R_sc, self.R_ss,
             self.sel1.faint, self.sel1.bright,
             self.sel2.faint, self.sel2.bright,
         )

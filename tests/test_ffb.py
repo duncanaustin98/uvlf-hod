@@ -19,6 +19,7 @@ from halogal import (HalomodMstarHOD, HalomodMstarHOD_FFB, HalomodUVHOD,
                      UVHODModel_FFB, UVObservables)
 from halogal.config import BARYON_FRACTION, DEFAULT_HOD_PARAMS
 from halogal.cosmology import get_halo_mass_function
+from halogal.dust import NoDust
 from halogal.model import Observables
 
 FFB_PARAMS = ("ffb_delta", "eps_max_ffb")
@@ -166,40 +167,45 @@ class TestHMRFFBInheritance:
 
 
 class TestUVHMRFFB:
-    # add_dust=False: the dust iteration only converges MUV to ~0.02 mag,
+    # dust=None: the dust iteration only converges MUV to ~0.02 mag,
     # which would swamp the small differences compared here.
 
-    def test_add_dust_still_passed_through(self):
-        m = UVHMRModel_FFB(z=10.0, add_dust=False, ffb_delta=0.3)
+    def test_dust_still_passed_through(self):
+        m = UVHMRModel_FFB(z=10.0, dust=None, ffb_delta=0.3)
+        assert m.dust == NoDust() and m.ffb_delta == 0.3
+        assert m._settings()["dust"] == NoDust()
+
+    def test_deprecated_add_dust_still_passed_through(self):
+        with pytest.warns(DeprecationWarning):
+            m = UVHMRModel_FFB(z=10.0, add_dust=False, ffb_delta=0.3)
         assert m.add_dust is False and m.ffb_delta == 0.3
-        assert m._settings()["add_dust"] is False
 
     def test_ffb_haloes_are_brighter(self):
-        ffb = UVHMRModel_FFB(z=10.0, add_dust=False)
-        std = UVHMRModel(z=10.0, add_dust=False)
+        ffb = UVHMRModel_FFB(z=10.0, dust=None)
+        std = UVHMRModel(z=10.0, dust=None)
         dMUV = ffb.MUV(MH) - std.MUV(MH)
         assert np.all(dMUV <= 1e-9)
         assert dMUV.min() < -1.0           # strong boost inside the FFB window
 
     def test_boost_is_confined_to_ffb_window(self):
-        ffb = UVHMRModel_FFB(z=10.0, add_dust=False)
-        std = UVHMRModel(z=10.0, add_dust=False)
+        ffb = UVHMRModel_FFB(z=10.0, dust=None)
+        std = UVHMRModel(z=10.0, dust=None)
         outside = np.array([1e8, 1e15])
         assert ffb.MUV(outside) == pytest.approx(std.MUV(outside), abs=1e-3)
 
     def test_matches_standard_when_ffb_inactive(self):
-        ffb = UVHMRModel_FFB(z=4.0, add_dust=False)
-        std = UVHMRModel(z=4.0, add_dust=False)
+        ffb = UVHMRModel_FFB(z=4.0, dust=None)
+        std = UVHMRModel(z=4.0, dust=None)
         assert ffb.MUV(MH) == pytest.approx(std.MUV(MH), abs=1e-2)
 
     def test_eps_max_update_changes_luminosity(self):
-        m = UVHMRModel_FFB(z=10.0, add_dust=False)
+        m = UVHMRModel_FFB(z=10.0, dust=None)
         before = m.MUV(1e11)[0]
         m.update_parameters(eps_max_ffb=0.3)
         assert m.MUV(1e11)[0] > before        # fainter
 
     def test_inverse_relation_roundtrip(self):
-        m = UVHMRModel_FFB(z=10.0, add_dust=False)
+        m = UVHMRModel_FFB(z=10.0, dust=None)
         Mh = np.array([1e10, 1e11, 1e12])
         assert m.Mhalo(m.MUV(Mh)) == pytest.approx(Mh, rel=0.05)
 
@@ -266,8 +272,8 @@ class TestHODFFBInheritance:
 
 
 class TestUVHODFFB:
-    def test_add_dust_still_passed_through(self):
-        assert UVHODModel_FFB(z=10.0, add_dust=False).add_dust is False
+    def test_dust_still_passed_through(self):
+        assert UVHODModel_FFB(z=10.0, dust=None).dust == NoDust()
 
     def test_ncen_is_a_probability(self):
         ncen = UVHODModel_FFB(z=10.0).Ncen(MH, -19.0)
@@ -278,8 +284,8 @@ class TestUVHODFFB:
         assert m.Ncen(1e11, m.MUV(1e11)[0])[0] == pytest.approx(0.5)
 
     def test_ffb_raises_central_occupation(self):
-        ffb = UVHODModel_FFB(z=10.0, add_dust=False).Ncen(MH, -20.0)
-        std = UVHODModel(z=10.0, add_dust=False).Ncen(MH, -20.0)
+        ffb = UVHODModel_FFB(z=10.0, dust=None).Ncen(MH, -20.0)
+        std = UVHODModel(z=10.0, dust=None).Ncen(MH, -20.0)
         assert np.all(ffb >= std - 1e-12) and np.max(ffb - std) > 0.1
 
     def test_ngal_is_sum(self):

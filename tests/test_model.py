@@ -9,6 +9,7 @@ import pytest
 from halogal import (HODModel, MstarHODModel, MstarObservables, SHMRModel,
                      UVHMRModel, UVHODModel, UVObservables)
 from halogal.config import BARYON_FRACTION, DEFAULT_HOD_PARAMS
+from halogal.dust import DEFAULT_DUST
 from halogal.cosmology import get_halo_bias, get_halo_mass_function
 from halogal.luminosity import MUV_from_SFR, SFR_from_MUV
 from halogal.model import Observables
@@ -62,13 +63,13 @@ class TestUVHMR:
 
     def test_sfr_muv_conversion_roundtrip_without_dust(self):
         sfr = np.array([0.1, 1.0, 10.0])
-        muv = MUV_from_SFR(sfr, 6.0, add_dust=False)
-        assert SFR_from_MUV(muv, 6.0, remove_dust=False) == pytest.approx(sfr)
+        muv = MUV_from_SFR(sfr, 6.0, dust=None)
+        assert SFR_from_MUV(muv, 6.0, dust=None) == pytest.approx(sfr)
 
     def test_dust_only_dims(self):
         sfr = np.array([1.0, 30.0, 300.0])
-        dusty = MUV_from_SFR(sfr, 5.0, add_dust=True)
-        clean = MUV_from_SFR(sfr, 5.0, add_dust=False)
+        dusty = MUV_from_SFR(sfr, 5.0)
+        clean = MUV_from_SFR(sfr, 5.0, dust=None)
         assert np.all(dusty >= clean - 1e-9)
 
 
@@ -438,9 +439,9 @@ class TestSelectionVariableCache:
         assert not np.array_equal(m.Ncen(Mh, -19), base)
         m.eps0 = DEFAULT_HOD_PARAMS["eps0"]          # direct attribute
         assert np.array_equal(m.Ncen(Mh, -19), base)
-        m.add_dust = False                            # setting
+        m.dust = None                                 # setting
         assert not np.array_equal(m.Ncen(Mh, -19), base)
-        m.add_dust = True
+        m.dust = DEFAULT_DUST
         assert not np.array_equal(m.Ncen(np.logspace(9.5, 13, 50), -19),
                                   base)               # new mass grid
 
@@ -449,3 +450,40 @@ class TestSelectionVariableCache:
         x = m._cached_selection_variable(np.logspace(9, 13, 10))
         with pytest.raises(ValueError):
             x[0] = 0.0
+
+
+# --------------------------------------------------------------------------
+# Centrals-only models (satellites=False)
+# --------------------------------------------------------------------------
+class TestSatellitesSwitch:
+    MH = np.logspace(9, 14, 40)
+
+    def test_default_has_satellites(self):
+        m = UVHODModel(z=7.0)
+        assert m.satellites is True
+        assert np.any(m.Nsat(self.MH, -19.0) > 0)
+
+    def test_off_gives_centrals_only(self):
+        m = UVHODModel(z=7.0, satellites=False)
+        assert np.all(m.Nsat(self.MH, -19.0) == 0)
+        assert m.Ngal(self.MH, -19.0) == pytest.approx(m.Ncen(self.MH, -19.0))
+
+    def test_satellites_only_add_galaxies(self):
+        MUV = np.array([-22.0, -20.0, -18.0])
+        with_sat = Observables(UVHODModel(z=7.0)).luminosity_function(MUV)
+        cen = Observables(UVHODModel(z=7.0, satellites=False)
+                          ).luminosity_function(MUV)
+        assert np.all(cen <= with_sat) and np.all(cen > 0)
+
+    def test_update_parameters_and_param_names(self):
+        m = UVHODModel(z=7.0)
+        assert "satellites" in m.param_names()
+        m.update_parameters(satellites=False)
+        assert np.all(m.Nsat(self.MH, -19.0) == 0)
+        obs = Observables(UVHODModel(z=7.0))
+        obs._apply_params({"satellites": False})
+        assert obs.hod_model.satellites is False
+
+    def test_mstar_model_too(self):
+        m = MstarHODModel(z=6.0, satellites=False)
+        assert np.all(m.Nsat(self.MH, 9.0) == 0)

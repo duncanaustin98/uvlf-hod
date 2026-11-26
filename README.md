@@ -17,7 +17,7 @@ A Python package for modeling UV luminosity functions and galaxy clustering usin
 - **Correlation Functions**: Angular, real-space, and projected 2PCFs via halomod
 - **Efficient Parameter Updates**: All observables accept inline `**params` for fast MCMC loops
 - **Bayesian Inference**: `halogal.inference` fits the model to UVLF, clustering and number-density data with `emcee` or `dynesty` behind one interface
-- **Dust Attenuation**: Self-consistent treatment following Bouwens+2013-14
+- **Dust Attenuation**: General, self-consistent prescription (`halogal.dust`): any observed beta-M_UV distribution (e.g. linear fits evolving in redshift, or per-bin tables) with a configurable A_UV-beta slope and intrinsic beta; defaults to Bouwens+2014 beta-M_UV with Meurer+1999
 - **Fitted Parameters**: Defaults from Shuntov+2025
 - **Redshift Evolution**: Built-in parameter evolution with redshift
 
@@ -245,7 +245,8 @@ halogal/
 ├── config.py            # Configuration and defaults
 ├── cosmology.py         # Halo mass function and bias
 ├── model.py             # Unified UVHMR, HOD, and Observables
-├── luminosity.py        # UV luminosity and dust
+├── luminosity.py        # UV luminosity <-> SFR (applies the dust model)
+├── dust.py              # Dust models and beta-M_UV relations
 ├── crosscorr.py         # Cross-correlations of two magnitude-selected samples
 ├── inference/           # MCMC / nested-sampling fits
 │   ├── parameters.py       # Priors, Parameter, ParameterSet

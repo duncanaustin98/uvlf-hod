@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 """Fit the UVHOD model to the EPOCHS-v2 UVLF at a single redshift.
 
-By default the free parameters are ``eps0, a, sigma_UV``. The characteristic
-mass ``logMc``, the high-mass slope ``b`` and the satellite HOD (``logMcut,
-logMsat, asat``) are held fixed, at their Shuntov+2025 values: the linear
-redshift evolution (``halogal.config.DEFAULT_REDSHIFT_EVOLUTION``) evaluated
-at the fit redshift. On the command line (all repeatable):
+By default the model has no satellites (centrals only; ``--satellites`` to
+include them, see below) and the free parameters are ``eps0, a, sigma_UV``.
+The characteristic mass ``logMc`` and the high-mass slope ``b`` (and, with
+``--satellites``, the satellite HOD ``logMcut, logMsat, asat``) are held
+fixed, at their Shuntov+2025 values: the linear redshift evolution
+(``halogal.config.DEFAULT_REDSHIFT_EVOLUTION``) evaluated at the fit
+redshift. On the command line (all repeatable):
     --fix NAME          fix NAME at its Shuntov+25 value
     --fix NAME=VALUE    fix NAME at VALUE (masses in log10), e.g. asat=0.8
     --free NAME         fit NAME although it is fixed by default, e.g.
@@ -13,6 +15,31 @@ at the fit redshift. On the command line (all repeatable):
     --shuntov z7.3      take the Shuntov+25 values from their z~7.3 bin
                         (Table 2 posterior medians) instead of the redshift
                         evolution; also z4.3, z5.4 (default: evo)
+
+Dust (``--dust``, see :data:`DUST_CHOICES` and ``halogal.dust``):
+    --dust bouwens14    Bouwens+14 beta-M_UV (sigma_beta = 0.34) with the
+                        Meurer+99 A_UV-beta relation (the halogal default
+                        dust, and the default here; ``--dust default`` is an
+                        alias)
+    --dust epochs       EPOCHS Paper-1 beta-M_UV fits (beta(M_UV=-19),
+                        dbeta/dM_UV and sigma_beta linear in z about z = 7),
+                        with Meurer+99
+    --dust none         no dust
+Satellites are off by default (``--no-satellites``, centrals only): the
+satellite HOD (``logMcut``, ``logMsat``, ``asat``) is dropped from the model
+and the fit (they cannot be given to ``--fix`` / ``--free``), so the UVLF,
+bias and every plot are those of centrals. ``--satellites`` includes them,
+with the satellite HOD fixed at its Shuntov+25 values unless freed. With
+those values satellites barely change the UVLF (at z = 7 they are ~10% of
+the abundance at M_UV = -23 and <0.5% fainter than -21). Centrals-only runs
+go in ``..._nosat`` folders and record ``"satellites": false`` in the run
+settings; runs with satellites have neither, as before this option.
+
+The dust choice is part of the output folder name (``..._dust=<choice>``) and of
+the run settings stored with the chain, so fits with different dust are
+never mixed. Folders without ``_dust=`` predate this option: their chains
+used the earlier dust formula (not clipped at the intrinsic beta), so they
+are not resumed or re-plotted with the current dust models.
 
 Walkers move with emcee's differential-evolution proposals by default
 (``--moves de``: 80% DEMove + 20% DESnookerMove), which explore correlated
@@ -67,7 +94,7 @@ A (PRIORS), and ``<x>_1`` = the exponent, with EXPONENT_PRIOR (flat in
 exponent fixed at 0). Fixed parameters follow the Shuntov+25 linear evolution
 (``--shuntov evo``), or are constant in z (a ``--shuntov`` bin, or
 ``--fix NAME=VALUE``). Outputs go to ``<data>_UVLF/joint_powerlaw/
-fixed=..._shuntov25_<shuntov>[_const=<no-evolve names>]/z=7+8+...[_n]/``:
+fixed=..._shuntov25_<shuntov>_dust=<dust>[_const=<no-evolve names>]/z=7+8+...[_n]/``:
 chain.h5, params.h5 (with ``model``, ``z_pivot`` and the redshift of every
 fitted point), convergence.log/.pdf, corner.pdf (red: a power-law
 approximation of Shuntov+25 over the fitted z), params_vs_z.pdf (each
@@ -91,7 +118,8 @@ steps instead.
 The chain is checkpointed to ``<outdir>/chain.h5``, and re-running the
 same command resumes it (delete the file to start afresh). The checkpoint
 stores the settings defining the posterior (z, M_UV cut, bin width, HMF grid,
-walkers, priors, fixed values and a hash of the fitted data). A resume with
+walkers, priors, fixed values, the full dust model and a hash of the fitted
+data). A resume with
 different settings, or different fitted data (stored in ``params.h5``), goes
 to a new ``z=<z>_2``, ``_3``, ... folder, so two posteriors are never mixed. Re-running
 on a checkpoint that has already converged, or that is at the ``--nsteps``
@@ -99,11 +127,13 @@ cap, re-makes the fit without sampling; the plots of a converged chain are
 only remade if any is missing, or with ``--replot``.
 
 Outputs go to
-``examples/outputs/EPOCHS_DR2_UVLF/fixed=<p1>+<p2>+..._shuntov25_<shuntov>/z=<z>/``
+``examples/outputs/EPOCHS_DR2_UVLF/fixed=<p1>+<p2>+..._shuntov25_<shuntov>_dust=<dust>/z=<z>/``
 (``EPOCHS_DR2+<sets>_UVLF`` with ``--lit``), which git ignores: one folder per fixed set, named from the fixed parameter
-names and the ``--shuntov`` source of their values (default
-``fixed=logMc+b+logMcut+logMsat+asat_shuntov25_evo``; with ``--shuntov z7.3``,
-``..._shuntov25_z7.3``). Each run records its fixed values (and
+names, the ``--shuntov`` source of their values, the dust and, for
+centrals-only fits, ``_nosat`` (default
+``fixed=logMc+b_shuntov25_evo_dust=bouwens14_nosat``; with ``--shuntov z7.3``,
+``..._shuntov25_z7.3_...``; with ``--satellites``,
+``fixed=logMc+b+logMcut+logMsat+asat_shuntov25_evo_dust=bouwens14``). Each run records its fixed values (and
 whether they are Shuntov+25 or ``--fix`` values) and its priors in
 ``z=<z>/params.h5``. On every run the folder is chosen by checking
 ``fixed=...``, then ``fixed=..._2``, ``_3``, ... and taking the first whose
@@ -123,6 +153,10 @@ run folder directly and skips this search. Files in the run folder:
                              bins map onto
     muv_mhalo.pdf            mean M_UV(Mh) of centrals (median, 16-84%,
                              +-sigma_UV scatter), with the fitted M_UV bins
+    auv_mhalo.pdf            dust attenuation A_UV(Mh) of the mean central
+                             (median, 16-84%), with the halo masses the
+                             fitted M_UV bins map onto (only if the fitted
+                             model has dust)
     galaxy_bias.pdf          galaxy bias b_g in M_UV bins and of cumulative
                              M_UV < M_UV,thresh samples (median, 16-84%),
                              with Shuntov+25's published model values
@@ -168,6 +202,9 @@ from halogal.inference import (  # noqa: E402
     ModelParametrization, Dataset, GaussianLikelihood, EmceeSampler,
 )
 from halogal.inference.parametrization import HOD_PARAM_SPEC  # noqa: E402
+from halogal.dust import (DEFAULT_DUST, BetaDust, LinearBetaMUV,  # noqa: E402
+                          NoDust, resolve_dust)
+from halogal.luminosity import MUV_from_SFR  # noqa: E402
 from halogal.model import HODModel, Observables  # noqa: E402
 from literature_data import (  # noqa: E402
     DEFAULT_LITERATURE, LITERATURE, literature_tag, load_literature_uvlf)
@@ -208,13 +245,37 @@ def output_root(lit_names=()):
         literature_tag(n) for n in lit_names) + "_UVLF")
 
 
-def fixed_spec(fix_args=(), free_args=()):
+#: Sampling names of the satellite HOD parameters (dropped without --satellites).
+SAT_NAMES = ("logMcut", "logMsat", "asat")
+
+
+class FixedSpec(dict):
+    """Fixed parameters ``{name: value or None}`` (see :func:`fixed_spec`).
+
+    ``satellites`` is False for a centrals-only fit (``--no-satellites``):
+    the :data:`SAT_NAMES` are then neither fixed nor free, but left out of
+    the fit, and the model has no satellites.
+    """
+    satellites = True
+
+
+def fit_names(spec):
+    """Sampling names that take part in the fit (fixed or free)."""
+    names = [s[1] for s in HOD_PARAM_SPEC]
+    if not getattr(spec, "satellites", True):
+        names = [n for n in names if n not in SAT_NAMES]
+    return names
+
+
+def fixed_spec(fix_args=(), free_args=(), satellites=False):
     """Fixed parameters as ``{name: value or None}``, None = Shuntov+25 at z.
 
     Starts from :data:`FIXED_SHUNTOV`. Each item of ``fix_args`` is ``NAME``
     (fix at the Shuntov+25 value) or ``NAME=VALUE`` (fix at VALUE; masses in
     log10); each name in ``free_args`` is fitted instead. Ordered as in
-    ``HOD_PARAM_SPEC``.
+    ``HOD_PARAM_SPEC``. With ``satellites=False`` (the default, as on the
+    command line) the satellite parameters are left out (a
+    :class:`FixedSpec` with ``satellites = False``).
     """
     valid = [spec[1] for spec in HOD_PARAM_SPEC]
     spec = {n: None for n in FIXED_SHUNTOV}
@@ -242,18 +303,38 @@ def fixed_spec(fix_args=(), free_args=()):
         if name in seen:
             raise SystemExit(f"{name} given to both --fix and --free")
         spec.pop(name, None)
-    return {n: spec[n] for n in valid if n in spec}
+    out = FixedSpec((n, spec[n]) for n in valid if n in spec)
+    if not satellites:
+        bad = sorted({item.partition("=")[0].strip() for item in fix_args}
+                     .union(free_args).intersection(SAT_NAMES))
+        if bad:
+            raise SystemExit(f"no satellites (the default; --satellites to "
+                             f"include them): {', '.join(bad)} cannot be "
+                             "fixed or fitted without satellites")
+        out = FixedSpec((n, v) for n, v in out.items() if n not in SAT_NAMES)
+        out.satellites = False
+    return out
 
 
-def fixed_label(spec, source="evo"):
-    """Folder name: ``fixed=<p1>+<p2>+..._shuntov25_<source>``.
+def fixed_label(spec, source="evo", dust=None):
+    """Folder name:
+    ``fixed=<p1>+<p2>+..._shuntov25_<source>_dust=<dust>[_nosat]``.
 
     The fixed parameter names, then where their Shuntov+25 values come from
-    (``--shuntov``: ``evo``, ``z4.3``, ``z5.4`` or ``z7.3``), e.g.
-    ``fixed=logMc+b+logMcut+logMsat+asat_shuntov25_z7.3``.
+    (``--shuntov``: ``evo``, ``z4.3``, ``z5.4`` or ``z7.3``) and the
+    ``--dust`` choice, e.g.
+    ``fixed=logMc+b+logMcut+logMsat+asat_shuntov25_z7.3_dust=epochs``;
+    ``_nosat`` is appended for a centrals-only fit. With nothing fixed it is
+    ``all_free[_dust=<dust>][_nosat]``: no Shuntov+25 values are used, so
+    the source is left out.
     """
-    return ("fixed=" + ("+".join(spec) if spec else "none")
-            + f"_shuntov25_{source}")
+    if spec:
+        base = "fixed=" + "+".join(spec) + f"_shuntov25_{source}"
+    else:
+        base = "all_free"
+    return (base
+            + ("" if dust is None else f"_dust={dust}")
+            + ("" if getattr(spec, "satellites", True) else "_nosat"))
 
 
 def _prior_record(prior):
@@ -424,7 +505,7 @@ def record_matches(stored, current, same_z):
     return True
 
 
-def choose_outdir(root, spec, record, z, source="evo"):
+def choose_outdir(root, spec, record, z, source="evo", dust=None):
     """Find the ``fixed=...`` folder for this run.
 
     Tries ``root/fixed=...``, then ``..._2``, ``..._3``, ... and returns the
@@ -434,7 +515,7 @@ def choose_outdir(root, spec, record, z, source="evo"):
     used. If none matches, the first unused suffix is returned (a new run).
     The run itself goes in the ``z=<z>`` subfolder of the returned folder.
     """
-    base = fixed_label(spec, source)
+    base = fixed_label(spec, source, dust)
     k = 1
     while True:
         outdir = root / (base if k == 1 else f"{base}_{k}")
@@ -527,7 +608,7 @@ def build_parameters(shuntov, spec=None):
     spec = fixed_spec() if spec is None else spec
     params = []
     for name, prior in PRIORS.items():
-        if name in spec:
+        if name in spec or name not in fit_names(spec):
             continue
         # Start walkers at the Shuntov+25 value when it lies inside the prior.
         start = shuntov[name] if np.isfinite(prior.logpdf(shuntov[name])) else None
@@ -555,7 +636,14 @@ LOG10_DISPLAY = {"eps0": r"$\log_{10}\,\epsilon_0$",
 def fixed_lines(spec, shuntov, ref):
     """One line per fixed parameter: its value and where it comes from."""
     return [f"{LABELS[n]} = {shuntov[n]:.2f} ({ref})" if v is None
-            else f"{LABELS[n]} = {v:g}" for n, v in spec.items()]
+            else f"{LABELS[n]} = {v:g}" for n, v in spec.items()] \
+        + satellite_lines(spec)
+
+
+def satellite_lines(spec):
+    """Plot note for a centrals-only fit."""
+    return ([] if getattr(spec, "satellites", True)
+            else ["no satellites (centrals only)"])
 
 
 def plot_corner(result, truths, path, header, fixed_txt=""):
@@ -632,7 +720,7 @@ def plot_observables(like, z):
     The same coarse HMF grid as the likelihood (as GaussianLikelihood seeds
     it), so the curves are the fitted model and ~2x faster to compute.
     """
-    obs = Observables(HODModel(z=z))
+    obs = Observables(HODModel(z=z, **like.model_kwargs))
     if like.hmf_points is not None:
         from halogal.cosmology import get_halo_mass_function
         obs._hmf_cache[z] = get_halo_mass_function(
@@ -656,12 +744,15 @@ def fit_title(result, z, what="EPOCHS-v2 UVLF"):
 
 
 def fixed_box(ax, spec, shuntov, ref, x=0.03, y=0.97, ha="left", va="top"):
-    """Text box listing the fixed parameters and their values."""
+    """Text box listing the fixed parameters and their values. Returns the
+    text artist, or None if nothing is fixed."""
     lines = fixed_lines(spec, shuntov, ref)
     if lines:
-        ax.text(x, y, "fixed:\n" + "\n".join(lines), transform=ax.transAxes,
-                ha=ha, va=va, fontsize=9,
-                bbox=dict(boxstyle="round", fc="white", ec="0.7", alpha=0.9))
+        return ax.text(x, y, "fixed:\n" + "\n".join(lines),
+                       transform=ax.transAxes, ha=ha, va=va, fontsize=9,
+                       bbox=dict(boxstyle="round", fc="white", ec="0.7",
+                                 alpha=0.9))
+    return None
 
 
 def plot_uvlf_residuals(result, like, dataset, data_all, shuntov, z, muv_max,
@@ -1027,6 +1118,113 @@ def plot_muv_mhalo(result, like, dataset, shuntov, z, path, n_draws=200,
     plt.close(fig)
 
 
+def auv_of_mh(model, Mh):
+    """Dust attenuation A_UV(Mh) of the mean central: observed minus
+    intrinsic M_UV at the model's SFR(Mh), for whatever dust model it uses."""
+    return model.MUV(Mh) - MUV_from_SFR(model.sfr(Mh), model.z, dust=None)
+
+
+#: ``--dust`` choices: (dust model, label for plots).
+DUST_CHOICES = {
+    "bouwens14": (DEFAULT_DUST, r"Bouwens+14 $\beta$-$M_{\rm UV}$"),
+    "epochs": (BetaDust(LinearBetaMUV.epochs_paper1()),
+               r"EPOCHS Paper-1 $\beta$-$M_{\rm UV}$"),
+    "none": (NoDust(), "no dust"),
+}
+
+
+def model_kwargs(args):
+    """Fixed model settings of the fit (``GaussianLikelihood.model_kwargs``)."""
+    return {"dust": dust_model(args.dust),
+            "satellites": args.satellites}
+
+
+#: Other accepted ``--dust`` names, mapped to the DUST_CHOICES key they mean.
+DUST_ALIASES = {"default": "bouwens14"}
+
+
+def dust_model(name):
+    """The dust model of a ``--dust`` choice."""
+    return DUST_CHOICES[name][0]
+
+
+def dust_setting(name):
+    """The dust model as stored in the run settings: its full repr, so a
+    change to a preset's numbers also counts as a different posterior."""
+    return repr(dust_model(name))
+
+
+def fit_dust(like):
+    """Dust model the likelihood's HOD models use."""
+    return resolve_dust(like.model_kwargs.get("dust", DEFAULT_DUST))
+
+
+def fit_has_dust(like):
+    """Whether the fitted model applies dust."""
+    return not isinstance(fit_dust(like), NoDust)
+
+
+def plot_auv_mhalo(result, like, dataset, shuntov, z, path, n_draws=200,
+                   seed=0, spec=None, ref="Shuntov+25"):
+    """Dust attenuation A_UV(Mh) of the mean central: posterior median and
+    16-84% band, the reference curve, and the halo-mass range the fitted
+    M_UV bins map onto. The dust prescription (A_UV at fixed observed M_UV)
+    is fixed in the fit, so A_UV(Mh) varies between draws only through
+    M_UV(Mh)."""
+    auv = halo_relation(result, like, shuntov, z, auv_of_mh, n_draws, seed)
+    muv = halo_relation(result, like, shuntov, z,
+                        lambda m, Mh: m.MUV(Mh), n_draws=1, seed=seed)
+    dust = fit_dust(like)
+
+    fig, ax = plt.subplots(figsize=(7, 5.5))
+    mh_fit = fitted_mh_range(muv["median"], dataset)
+    if mh_fit is not None:
+        ax.axvspan(*mh_fit, color="0.92", lw=0, zorder=0,
+                   label="fitted $M_{\\rm UV}$ bins (median relation)")
+    ax.fill_between(LOG10_MH_GRID, auv["lo"], auv["hi"], color="tab:blue",
+                    alpha=0.3, lw=0, label="posterior 16-84%")
+    ax.plot(LOG10_MH_GRID, auv["median"], color="tab:blue", lw=2,
+            label="posterior median")
+    ax.plot(LOG10_MH_GRID, auv["ref"], color="tab:red", ls="--", lw=1.5,
+            label=ref_label(ref, z))
+    ax.set_xlim(LOG10_MH_GRID[0], LOG10_MH_GRID[-1])
+    ax.set_ylim(0, 1.15 * max(np.max(auv["hi"]), np.max(auv["ref"]), 0.1))
+    ax.set_xlabel(r"$\log_{10}(M_{\rm h}/M_\odot)$")
+    ax.set_ylabel(r"$A_{\rm UV}(M_{\rm h})$ [mag]")
+    ax.set_title(fit_title(result, z, r"$A_{\rm UV}$-$M_{\rm h}$ from the "
+                           "EPOCHS-v2 UVLF fit") + "\n" + dust_label(dust),
+                 fontsize=10)
+    # A_UV rises with Mh, so the upper left is free: the fixed box there and
+    # the legend directly below it.
+    box = fixed_box(ax, fixed_spec() if spec is None else spec, shuntov, ref)
+    top = 0.99
+    if box is not None:
+        fig.canvas.draw()
+        top = ax.transAxes.inverted().transform_bbox(
+            box.get_bbox_patch().get_window_extent()).y0 - 0.02
+    ax.legend(loc="upper left", bbox_to_anchor=(0.01, top), fontsize=9)
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def dust_label(dust):
+    """Short description of a dust model for plot annotations."""
+    rel = getattr(dust, "beta_relation", None)
+    if rel is None:
+        return "dust: none" if isinstance(dust, NoDust) else \
+            f"dust: {type(dust).__name__}"
+    slope, bint = dust.dA_dbeta, dust.beta_intr
+    names = [label for model, label in DUST_CHOICES.values()
+             if getattr(model, "beta_relation", None) == rel]
+    parts = names[:1] or [type(rel).__name__.replace(
+        "BetaMUV", r" $\beta$-$M_{\rm UV}$")]
+    if hasattr(slope, "value") and hasattr(bint, "value"):
+        parts.append(rf"$A_{{\rm UV}}={slope.value:.2f}"
+                     rf"(\beta{-bint.value:+.2f})$")
+    parts.append(rf"{dust.scatter_average}-avg. $\sigma_\beta$")
+    return "dust: " + ", ".join(parts)
+
+
 def shuntov25_threshold_bias(z):
     """Shuntov+25's published model bias of M_UV < thresh samples at z
     (interpolated in their bias-vs-z table): ``(thresholds, bias)``, or None
@@ -1236,11 +1434,19 @@ def plot_convergence(source, names, burnin, path, n_tau=50,
 
 PLOT_KINDS = ("corner", "uvlf_residuals", "sfe_mhalo", "muv_mhalo",
               "galaxy_bias", "convergence")
+#: Made in addition to PLOT_KINDS when the fitted model has dust.
+DUST_PLOT_KINDS = ("auv_mhalo",)
+
+
+def plot_kinds(like):
+    """Single-z plot names (with the dust plots if the fit has dust)."""
+    return PLOT_KINDS + (DUST_PLOT_KINDS if fit_has_dust(like) else ())
 
 
 def make_plots(result, burnin, chain_source, ctx, n_draws, grid_step=0.1):
     """Write the corner, UVLF + residuals, SFE-Mhalo, M_UV-Mhalo, galaxy
-    bias and convergence plots (:data:`PLOT_KINDS`).
+    bias and convergence plots (:data:`PLOT_KINDS`), and A_UV-Mhalo if the
+    model has dust (:data:`DUST_PLOT_KINDS`).
 
     Returns the goodness-of-fit and convergence summaries.
     """
@@ -1266,6 +1472,9 @@ def make_plots(result, burnin, chain_source, ctx, n_draws, grid_step=0.1):
                    a.outdir / "sfe_mhalo.pdf", **common)
     plot_muv_mhalo(result, ctx["like"], fitted, ctx["shuntov"], a.z,
                    a.outdir / "muv_mhalo.pdf", **common)
+    if fit_has_dust(ctx["like"]):
+        plot_auv_mhalo(result, ctx["like"], fitted, ctx["shuntov"], a.z,
+                       a.outdir / "auv_mhalo.pdf", **common)
     plot_galaxy_bias(result, ctx["like"], ctx["dataset"], ctx["shuntov"],
                      a.z, a.muv_max, a.outdir / "galaxy_bias.pdf",
                      grid_step=grid_step, **common)
@@ -1340,10 +1549,13 @@ def galfind_burn_thin(backend):
     n = backend.iteration
     try:
         tau_max = float(np.nanmax(backend.get_autocorr_time()))
-        reliable = True
+        reliable = bool(np.isfinite(tau_max))
     except Exception:  # emcee.autocorr.AutocorrError: chain < 50 tau
-        tau_max = n / 50
         reliable = False
+    if not reliable:
+        # Also when tau is NaN (e.g. a short chain in which some walker never
+        # moved, so its autocorrelation is 0/0).
+        tau_max = n / 50
     discard = min(int(2 * tau_max), max(n - 1, 0))
     thin = max(int(tau_max / 2), 1)
     return tau_max, reliable, discard, thin
@@ -1409,7 +1621,10 @@ def run_settings(args, params, dataset):
         "free_priors": {p.name: repr(p.prior) for p in params.free},
         "fixed": {p.name: float(p.value) for p in params.fixed_params},
         "data_sha256": h.hexdigest(),
+        "dust": dust_setting(args.dust),
     }
+    if not args.satellites:  # only recorded when off, so older runs match
+        settings["satellites"] = False
     return json.loads(json.dumps(settings))  # normalise as stored
 
 
@@ -1699,6 +1914,8 @@ def build_joint_parameters(spec, source, zs, z_pivot, no_evolve=()):
     linear = shuntov_linear_coeffs(source)
     params, roles = [], {}
     for _, sample, _, slope, offset in HOD_PARAM_SPEC:
+        if sample not in fit_names(spec):
+            continue
         if sample in spec:
             value = spec[sample]
             if value is None:
@@ -1775,7 +1992,10 @@ def joint_run_settings(args, params, datasets):
         "free_priors": {p.name: repr(p.prior) for p in params.free},
         "fixed": {p.name: float(p.value) for p in params.fixed_params},
         "data_sha256": h.hexdigest(),
+        "dust": dust_setting(args.dust),
     }
+    if not args.satellites:  # only recorded when off, so older runs match
+        settings["satellites"] = False
     return json.loads(json.dumps(settings))
 
 
@@ -1786,7 +2006,7 @@ def joint_fixed_lines(spec, source, ref, no_evolve):
                    f"({ref})") if v is None
              else f"{LABELS[n]} = {v:g}" for n, v in spec.items()]
     lines += [f"{LABELS[n]}: free, constant in z" for n in no_evolve]
-    return lines
+    return lines + satellite_lines(spec)
 
 
 def plot_params_vs_z(result, like, zs, source, ref, path, n_draws=200,
@@ -2021,16 +2241,21 @@ def plot_combined_z(result, like, zs, datasets, data_all, lit, muv_max,
     plt.close(fig)
 
 
-def joint_plot_paths(outdir, zs):
+def joint_plot_paths(outdir, zs, like):
     return ([outdir / f"{k}.pdf" for k in ("corner", "params_vs_z",
                                            "combined_z", "convergence")]
             + [outdir / z_folder(z) / f"{k}.pdf"
-               for z in zs for k in JOINT_PLOT_KINDS])
+               for z in zs for k in joint_plot_kinds(like)])
+
+
+def joint_plot_kinds(like):
+    """Per-bin plot names of a joint fit (with the dust plots if any)."""
+    return JOINT_PLOT_KINDS + (DUST_PLOT_KINDS if fit_has_dust(like) else ())
 
 
 def make_joint_plots(result, burnin, chain_source, ctx):
     """Corner, parameters-vs-z and convergence plots in the run folder, and
-    the single-z plots (UVLF + residuals, SFE, M_UV-Mh, bias) of each bin
+    the single-z plots (UVLF + residuals, SFE, M_UV-Mh, A_UV-Mh, bias) of each bin
     in its ``z=<z>`` subfolder. Returns the convergence summary."""
     a, like, zs = ctx["args"], ctx["like"], ctx["zs"]
     ref, spec, source = ctx["ref"], ctx["spec"], a.shuntov
@@ -2067,6 +2292,9 @@ def make_joint_plots(result, burnin, chain_source, ctx):
                        zdir / "sfe_mhalo.pdf", **common)
         plot_muv_mhalo(result, like, fitted, refz, z,
                        zdir / "muv_mhalo.pdf", **common)
+        if fit_has_dust(like):
+            plot_auv_mhalo(result, like, fitted, refz, z,
+                           zdir / "auv_mhalo.pdf", **common)
         plot_galaxy_bias(result, like, dataset, refz, z, a.muv_max,
                          zdir / "galaxy_bias.pdf", **common)
     return plot_convergence(chain_source, result.names, burnin,
@@ -2083,8 +2311,9 @@ def run_joint(args):
     [_const=..]/z=<z1>+<z2>+...[_n]/``.
     """
     zs = args.redshifts
-    spec = fixed_spec(args.fix, args.free)
-    bad = [n for n in args.no_evolve if n in spec or n not in PRIORS]
+    spec = fixed_spec(args.fix, args.free, args.satellites)
+    bad = [n for n in args.no_evolve
+           if n in spec or n not in PRIORS or n not in fit_names(spec)]
     if bad:
         raise SystemExit(f"--no-evolve {', '.join(bad)}: only free "
                          "parameters can be held constant in z")
@@ -2122,7 +2351,7 @@ def run_joint(args):
                     muv_max=(np.nan if args.muv_max is None
                              else float(args.muv_max)))
     if args.outdir is None:
-        label = fixed_label(spec, args.shuntov) + (
+        label = fixed_label(spec, args.shuntov, args.dust) + (
             f"_const={'+'.join(args.no_evolve)}" if args.no_evolve else "")
         root = output_root(list(dict.fromkeys(d["name"]
                                               for _, d in lit_all)))
@@ -2146,13 +2375,14 @@ def run_joint(args):
     like = GaussianLikelihood(
         datasets + [ds for ds, _ in lit_all],
         ModelParametrization("powerlaw", params, z_pivot=args.z_pivot),
-        hmf_points=args.hmf_points)
+        hmf_points=args.hmf_points,
+        model_kwargs=model_kwargs(args))
     ctx = dict(args=args, like=like, zs=zs, ref=ref, spec=spec,
                datasets=datasets, data_all=data_all, lit=lit)
     return run_chain(
         args, params, like, settings, ref, joint_reference(zs[0],
                                                            args.shuntov),
-        plot_paths=joint_plot_paths(args.outdir, zs),
+        plot_paths=joint_plot_paths(args.outdir, zs, like),
         plot_fn=lambda result, burnin, ck: make_joint_plots(
             result, burnin, ck, ctx))
 
@@ -2244,7 +2474,7 @@ def parse_args():
                     help="fit only bins with M_UV <= this; 'none' fits all "
                          "(default -18, the EPOCHS-v2 fiducial cut)")
     ap.add_argument("--nwalkers", type=int, default=32)
-    ap.add_argument("--nsteps", type=int, default=50000,
+    ap.add_argument("--nsteps", type=int, default=100000,
                     help="cap on the TOTAL steps per walker, including any "
                          "already in a resumed checkpoint (with "
                          "--no-converge: the total length)")
@@ -2271,6 +2501,19 @@ def parse_args():
                     help="seed for the walker start (new chains only)")
     ap.add_argument("--hmf-points", type=int, default=256,
                     help="HMF mass-grid points for the UVLF integral")
+    ap.add_argument("--satellites", action=argparse.BooleanOptionalAction,
+                    default=False,
+                    help="include satellites (satellite HOD logMcut, logMsat, "
+                         "asat fixed at Shuntov+25 unless --free'd); by "
+                         "default the model is centrals only "
+                         "(--no-satellites)")
+    ap.add_argument("--dust", choices=(*DUST_CHOICES, *DUST_ALIASES),
+                    default="bouwens14",
+                    help="dust prescription: 'bouwens14' (Bouwens+14 "
+                         "beta-M_UV with Meurer+99; the halogal default, also "
+                         "accepted as 'default'), 'epochs' (EPOCHS Paper-1 "
+                         "beta-M_UV fits with Meurer+99) or 'none' "
+                         "(default: %(default)s)")
     ap.add_argument("--replot", action="store_true",
                     help="remake the plots of an already converged chain "
                          "(by default they are only made if missing)")
@@ -2322,6 +2565,9 @@ def parse_args():
                          + ". Default: EPOCHS-v2 only")
     args = ap.parse_args()
     args.redshifts = parse_redshifts(args.z)
+    # one name per dust model, so --dust default and --dust bouwens14 share
+    # an output folder
+    args.dust = DUST_ALIASES.get(args.dust, args.dust)
     if args.lit:
         unknown = [n for n in args.lit if n not in LITERATURE]
         if unknown:
@@ -2348,14 +2594,16 @@ def run_redshift(args):
     (interrupted before any step was saved).
     """
     z = args.z
-    spec = fixed_spec(args.fix, args.free)
+    spec = fixed_spec(args.fix, args.free, args.satellites)
 
     shuntov = shuntov25_values(z, args.shuntov)
     ref = shuntov_label(args.shuntov)
     print(f"{ref} parameters" + (f" at z={z:g}:" if args.shuntov ==
                                  "evo" else " (Table 2 medians):"))
     for name, val in shuntov.items():
-        if name not in spec:
+        if name not in fit_names(spec):
+            state = "not used: no satellites"
+        elif name not in spec:
             state = "free (start)"
         elif spec[name] is None:
             state = "fixed"
@@ -2383,7 +2631,7 @@ def run_redshift(args):
         root = output_root([d["name"] for _, d in lit])
         print(f"Choosing the output folder in {root}:")
         fixed_dir, how = choose_outdir(root, spec, record, z,
-                                       args.shuntov)
+                                       args.shuntov, args.dust)
         print(f"  using {fixed_dir.name} ({how})")
         args.outdir, how = choose_run_dir(fixed_dir, z_folder(z), settings,
                                           data_rec)
@@ -2404,12 +2652,14 @@ def run_redshift(args):
           + (" (literature points: group literature)" if lit else ""))
     like = GaussianLikelihood(
         [dataset] + [ds for ds, _ in lit],
-        ModelParametrization("fixed_z", params), hmf_points=args.hmf_points)
+        ModelParametrization("fixed_z", params), hmf_points=args.hmf_points,
+        model_kwargs=model_kwargs(args))
     ctx = dict(args=args, shuntov=shuntov, ref=ref, like=like, spec=spec,
                dataset=dataset, data_all=data_all, params=params, lit=lit)
     return run_chain(
         args, params, like, settings, ref, shuntov,
-        plot_paths=[args.outdir / f"{kind}.pdf" for kind in PLOT_KINDS],
+        plot_paths=[args.outdir / f"{kind}.pdf"
+                    for kind in plot_kinds(like)],
         plot_fn=lambda result, burnin, ck: make_plots(
             result, burnin, ck, ctx, n_draws=args.plot_draws)[1])
 
@@ -2561,6 +2811,10 @@ def main():
 
     args = parse_args()
     zs = args.redshifts
+    print(f"Dust (--dust {args.dust}): {dust_model(args.dust)!r}")
+    print("Satellites: " + ("on (--satellites)" if args.satellites
+                            else "off (centrals only; --satellites to "
+                                 "include them)"))
     if args.joint:
         _sigterm_to_keyboardinterrupt()
         try:

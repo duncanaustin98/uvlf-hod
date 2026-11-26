@@ -12,7 +12,10 @@ from scipy.stats import norm
 from abc import ABC, abstractmethod
 
 from .config import BARYON_FRACTION
+import warnings
+
 from .luminosity import MUV_from_SFR
+from .dust import DEFAULT_DUST, NoDust, resolve_dust
 from .cosmology import get_halo_mass_function, get_halo_bias
 
 try:
@@ -60,10 +63,19 @@ class HMRModel(ABC):
     #: Names accepted by ``update_parameters`` (extended by subclasses).
     _PARAM_NAMES = ('z', 'eps0', 'Mc', 'a', 'b')
 
+    #: Deprecated aliases still accepted by ``update_parameters`` (but not
+    #: reported by :meth:`param_names`, so they are never passed around).
+    _DEPRECATED_PARAM_NAMES = ()
+
     @classmethod
     def param_names(cls):
         """Names of all parameters accepted by :meth:`update_parameters`."""
         return cls._PARAM_NAMES
+
+    @classmethod
+    def accepted_param_names(cls):
+        """:meth:`param_names` plus deprecated aliases."""
+        return cls.param_names() + cls._DEPRECATED_PARAM_NAMES
 
     def __init__(
         self,
@@ -352,15 +364,20 @@ class UVHMRModel(HMRModel):
         Low-mass power-law slope. Default from config.
     b : float, optional
         High-mass power-law slope. Default from config.
+    dust : DustModel or None, optional
+        Dust attenuation model (see :mod:`halogal.dust`), e.g.
+        ``BetaDust(LinearBetaMUV.epochs_paper1())``. Default
+        :data:`~halogal.dust.DEFAULT_DUST` (Bouwens+14 beta-M_UV with the
+        Meurer+99 A_UV-beta relation); ``None`` for no dust.
     add_dust : bool, optional
-        Whether to include dust attenuation. Default is True.
+        Deprecated; use ``dust``.
         
     Attributes
     ----------
     z, eps0, Mc, a, b : float
         Model parameters
-    add_dust : bool
-        Whether dust is included
+    dust : DustModel
+        Dust attenuation model (:class:`~halogal.dust.NoDust` if none)
         
     Examples
     --------
@@ -371,13 +388,37 @@ class UVHMRModel(HMRModel):
     >>> model = UVHMRModel(z=6.0, eps0=0.2, Mc=10**12)
     """
     
-    _PARAM_NAMES = HMRModel._PARAM_NAMES + ('add_dust',)
+    _PARAM_NAMES = HMRModel._PARAM_NAMES + ('dust',)
+    _DEPRECATED_PARAM_NAMES = ('add_dust',)
 
-    def __init__(self, z, eps0=None, Mc=None, a=None, b=None, add_dust=True,
-                 **kwargs):
+    def __init__(self, z, eps0=None, Mc=None, a=None, b=None,
+                 dust=DEFAULT_DUST, add_dust=None, **kwargs):
         """Initialize UVHMR model."""
-        self.add_dust = add_dust
+        self.dust = dust
+        if add_dust is not None:
+            self.add_dust = add_dust
         super().__init__(z, eps0=eps0, Mc=Mc, a=a, b=b, **kwargs)
+
+    @property
+    def dust(self):
+        """Dust attenuation model (:class:`~halogal.dust.DustModel`)."""
+        return self._dust
+
+    @dust.setter
+    def dust(self, value):
+        self._dust = resolve_dust(value)
+
+    @property
+    def add_dust(self):
+        """Deprecated: whether any dust is applied. Use :attr:`dust`."""
+        return not isinstance(self._dust, NoDust)
+
+    @add_dust.setter
+    def add_dust(self, value):
+        warnings.warn(
+            "add_dust is deprecated; set dust=<DustModel> (or dust=None for "
+            "no dust) instead", DeprecationWarning, stacklevel=2)
+        self._dust = resolve_dust(bool(value))
     
     def halo_accretion_rate(self, Mh):
         """Compute halo mass accretion rate.
@@ -439,7 +480,7 @@ class UVHMRModel(HMRModel):
             UV absolute magnitude
         """
         sfr = self.sfr(Mh)
-        return MUV_from_SFR(sfr, self.z, add_dust=self.add_dust)
+        return MUV_from_SFR(sfr, self.z, dust=self.dust)
 
     def MUV(self, Mh):
         """UV absolute magnitude from halo mass.
@@ -457,7 +498,7 @@ class UVHMRModel(HMRModel):
         return self.property(Mh)
 
     def _settings(self):
-        return {**super()._settings(), 'add_dust': self.add_dust}
+        return {**super()._settings(), 'dust': self.dust}
 
     def update_parameters(self, **kwargs):
         """Update model parameters.
@@ -465,11 +506,13 @@ class UVHMRModel(HMRModel):
         Parameters
         ----------
         **kwargs : dict
-            Parameters to update: z, eps0, Mc, a, b, add_dust
+            Parameters to update: z, eps0, Mc, a, b, dust (and the
+            deprecated add_dust)
         """
+        if 'dust' in kwargs:
+            self.dust = kwargs['dust']
         if 'add_dust' in kwargs:
             self.add_dust = kwargs['add_dust']
-            #kwargs.pop('add_dust')
         super().update_parameters(**kwargs)
 
 
@@ -616,13 +659,20 @@ class BaseHODModel(HMRModel):
         Satellite normalization mass in M_sun. Default from config.
     asat : float, optional
         Satellite power-law slope. Default from config.
+    satellites : bool, optional
+        Whether haloes host satellites. If False, :meth:`Nsat` is zero, so
+        the abundance (e.g. the UVLF), bias and clustering are those of
+        centrals only, and ``Mcut``, ``Msat`` and ``asat`` have no effect.
+        Default True.
     **kwargs
-        Extra HMR arguments (e.g. ``add_dust`` for :class:`UVHMRModel`).
+        Extra HMR arguments (e.g. ``dust`` for :class:`UVHMRModel`).
 
     Attributes
     ----------
     Mcut, Msat, asat : float
         Satellite HOD parameters
+    satellites : bool
+        Whether satellites are included
     """
 
     _sigma_name = None
@@ -634,10 +684,12 @@ class BaseHODModel(HMRModel):
     _selection_sign = None
 
     def __init__(self, z, eps0=None, Mc=None, a=None, b=None,
-        sigma=None, Mcut=None, Msat=None, asat=None, **kwargs):
+        sigma=None, Mcut=None, Msat=None, asat=None, satellites=True,
+        **kwargs):
         from .config import DEFAULT_HOD_PARAMS
 
         super().__init__(z, eps0=eps0, Mc=Mc, a=a, b=b, **kwargs)
+        self.satellites = bool(satellites)
 
         setattr(self, self._sigma_name,
                 sigma if sigma is not None
@@ -649,7 +701,8 @@ class BaseHODModel(HMRModel):
     @classmethod
     def param_names(cls):
         """Names of all parameters accepted by :meth:`update_parameters`."""
-        return super().param_names() + (cls._sigma_name, *cls._SAT_PARAMS)
+        return super().param_names() + (cls._sigma_name, *cls._SAT_PARAMS,
+                                        'satellites')
 
     @property
     def _sigma(self):
@@ -744,6 +797,8 @@ class BaseHODModel(HMRModel):
         # astype(float): an integer mass array would truncate N_sat to
         # whole numbers (and zeros_like would make it an integer array).
         Mh = np.atleast_1d(Mh).astype(float)
+        if not self.satellites:
+            return np.zeros_like(Mh)
         N_cen = self.Ncen(Mh, thresh)
 
         # Satellites only exist above cutoff mass
@@ -776,12 +831,15 @@ class BaseHODModel(HMRModel):
         Parameters
         ----------
         **kwargs : dict
-            HMR parameters plus the scatter parameter, Mcut, Msat and asat.
+            HMR parameters plus the scatter parameter, Mcut, Msat, asat and
+            satellites.
         """
         super().update_parameters(**kwargs)
         for name in (self._sigma_name, *self._SAT_PARAMS):
             if name in kwargs:
                 setattr(self, name, kwargs[name])
+        if 'satellites' in kwargs:
+            self.satellites = bool(kwargs['satellites'])
 
     def __repr__(self):
         return (f"{type(self).__name__}(z={self.z}, eps0={self.eps0:.3f}, "
@@ -801,6 +859,8 @@ class BaseHODModel(HMRModel):
         s += f"  Mcut = {self.Mcut:.2e} M_sun\n"
         s += f"  Msat = {self.Msat:.2e} M_sun\n"
         s += f"  asat = {self.asat:.2f}\n"
+        if not self.satellites:
+            s += "  (satellites off: Mcut, Msat, asat unused)\n"
         settings = self._settings()
         if settings:
             s += "\nSettings:\n"
@@ -826,8 +886,11 @@ class UVHODModel(BaseHODModel, UVHMRModel):
         Scatter in M_UV at fixed halo mass, in mag. Default from config.
     Mcut, Msat, asat : float, optional
         Satellite parameters. Default from config.
+    dust : DustModel or None, optional
+        Dust attenuation model (see :class:`UVHMRModel`). Default
+        :data:`~halogal.dust.DEFAULT_DUST`; ``None`` for no dust.
     add_dust : bool, optional
-        Whether to include dust attenuation. Default is True.
+        Deprecated; use ``dust``.
 
     Attributes
     ----------
@@ -848,9 +911,9 @@ class UVHODModel(BaseHODModel, UVHMRModel):
 
     def __init__(self, z, eps0=None, Mc=None, a=None, b=None,
                  sigma_UV=None, Mcut=None, Msat=None, asat=None,
-                 add_dust=True, **kwargs):
+                 dust=DEFAULT_DUST, add_dust=None, **kwargs):
         super().__init__(z, eps0, Mc, a, b, sigma_UV, Mcut, Msat, asat,
-                         add_dust=add_dust, **kwargs)
+                         dust=dust, add_dust=add_dust, **kwargs)
 
     def _selection_variable(self, Mh):
         return self.MUV(Mh)
@@ -1059,7 +1122,7 @@ class Observables:
             ``sigmaUV`` for ``sigma_UV`` was silently ignored and the whole
             calculation quietly ran at the default value.
         """
-        names = self.hod_model.param_names()
+        names = self.hod_model.accepted_param_names()
         hod_updates = {k: v for k, v in params.items() if k in names}
         remaining = {k: v for k, v in params.items() if k not in names}
         if remaining:
@@ -1586,7 +1649,7 @@ class UVObservables(Observables):
             Magnitude bin width. Default is 0.05.
         **params : dict, optional
             HOD parameter overrides (eps0, Mc, a, b, sigma_UV, Mcut,
-            Msat, asat, add_dust). Applied to the model before computing.
+            Msat, asat, dust). Applied to the model before computing.
 
         Examples
         --------
@@ -1715,9 +1778,12 @@ class HalomodHOD(halomod.hod.HODPoisson if HALOMOD_AVAILABLE else object):
         if not HALOMOD_AVAILABLE:
             raise ImportError("halomod package required")
 
-        model_names = self._model_class.param_names()
+        model_names = self._model_class.accepted_param_names()
         model_params = {k: kwargs.pop(k) for k in list(kwargs) if k in model_names}
-        model_params = {k: v for k, v in model_params.items() if v is not None}
+        # None means "use the default" for every parameter except dust, where
+        # it means no dust (the dust default is the DustModel in _defaults).
+        model_params = {k: v for k, v in model_params.items()
+                        if v is not None or k == 'dust'}
 
         super().__init__(**kwargs)
 
@@ -1767,8 +1833,11 @@ class HalomodHOD(halomod.hod.HODPoisson if HALOMOD_AVAILABLE else object):
 
 
 def _halomod_defaults(model_class, thresh1):
-    return {"z": 5.0, "thresh1": thresh1, "thresh2": None, "M_min": 8.0,
-            **{n: None for n in model_class.param_names() if n != 'z'}}
+    defaults = {"z": 5.0, "thresh1": thresh1, "thresh2": None, "M_min": 8.0,
+                **{n: None for n in model_class.param_names() if n != 'z'}}
+    if 'dust' in defaults:
+        defaults['dust'] = DEFAULT_DUST
+    return defaults
 
 
 class HalomodUVHOD(HalomodHOD):

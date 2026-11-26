@@ -106,6 +106,7 @@ docs/_autosummary/
 .claude/
 examples/tutorial_chains/
 examples/outputs/
+examples/shell_scripts/
 chain*.npz
 
 # Apptainer image and build log (rebuild from container/halogal.def)
