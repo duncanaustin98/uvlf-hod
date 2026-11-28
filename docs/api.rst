@@ -14,6 +14,7 @@ them.
    halogal.model
    halogal.cosmology
    halogal.luminosity
+   halogal.dust
    halogal.config
    halogal.crosscorr
    halogal.models

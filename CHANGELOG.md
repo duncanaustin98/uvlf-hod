@@ -4,6 +4,55 @@
 
 ### Added
 
+- **`halogal.dust`**: a general dust prescription replacing the on/off
+  `add_dust` switch. Models take `dust=<DustModel>` (or `dust=None` for no
+  dust).
+  - `BetaDust(beta_relation, dA_dbeta, beta_intr, scatter_average, z_max)`:
+    per galaxy `A_UV = max(0, dA_dbeta * (beta - beta_intr))`, so galaxies
+    bluer than the intrinsic slope are dust free instead of getting a
+    negative attenuation. Defaults: Meurer+99 (`dA_dbeta = 1.99`,
+    `beta_intr = -4.43/1.99`) with the Bouwens+14 beta-M_UV relation and
+    `sigma_beta = 0.34`.
+  - The scatter in beta enters through a closed-form average over the
+    Gaussian beta distribution at fixed observed M_UV:
+    `scatter_average="luminosity"` (default; `2.5 log10 <10**(0.4 A_UV)>`,
+    which reduces to the old `+0.2 ln10 sigma^2 C1^2` term for red
+    populations), `"mean"` (`<A_UV>`) or `"none"`.
+  - beta-M_UV distributions: `LinearBetaMUV` (beta at a pivot M_UV, its slope
+    and scatter, each any function of z; `from_linear_z`, `from_table`,
+    `epochs_paper1()`), `Bouwens14BetaMUV` and the fully general
+    `FunctionBetaMUV(mean_fn, sigma_fn)`.
+  - Redshift-evolution helpers `ConstantZ`, `LinearZ` (with optional
+    `z_clip`), `PowerLawZ`, `TabulatedZ` and `as_z_function`; `dA_dbeta` and
+    `beta_intr` accept them too.
+  - `config.EPOCHS_PAPER1_BETA_MUV`: EPOCHS Paper-1 fits of beta(M_UV=-19),
+    dbeta/dM_UV and sigma_beta, each `A0 + A1 (z - 7)` over 6.5 < z < 13.5.
+- `tests/conftest.py` (shared fixtures) and `tests/test_dust.py`.
+- `satellites=False` on the HOD models (`UVHODModel`, `MstarHODModel` and
+  the FFB variants): `N_sat = 0`, so the abundance, bias and halomod
+  clustering are those of centrals only. It is a model parameter (in
+  `param_names()`, `update_parameters`, the caches and the halomod wrapper).
+- `examples/fit_uvlf.py --satellites / --no-satellites`: fits are now
+  centrals only by default. `logMcut`, `logMsat` and `asat` are then dropped
+  from the fit (and cannot be given to `--fix` / `--free`); such runs go in
+  `..._nosat` folders and record `"satellites": false` in the run settings.
+  `--satellites` restores the previous behaviour (satellite HOD fixed at
+  Shuntov+25 unless freed), with the same folder names and settings as
+  before.
+- `GaussianLikelihood(model_kwargs=...)`: fixed settings passed to every
+  bin's `HODModel`, e.g. `model_kwargs={"dust": BetaDust(...)}` to fit with a
+  different dust prescription.
+- `examples/fit_uvlf.py`:
+  - `--dust {bouwens14,epochs,none}` chooses the dust prescription
+    (`bouwens14`, the halogal default, is also accepted as `default`). The choice
+    is in the output folder name (`..._dust=<choice>`), and the full dust
+    model is stored in the chain's run settings, so a chain is never
+    resumed or re-plotted with different dust. Folders without `_dust=`
+    predate the option and used the earlier, unclipped dust formula.
+  - `auv_mhalo.pdf`: A_UV(Mh) of the mean central (posterior median and
+    16-84%, the reference curve and the fitted halo-mass range), made for
+    every fit with dust, single-z and per bin of a joint fit.
+
 - **`halogal.inference`**: Bayesian fitting of the UVHMR/HOD model to UV
   luminosity functions, angular/projected clustering and number densities.
   - `Parameter`, `ParameterSet` and the `Uniform`, `Normal`, `LogUniform`
@@ -127,11 +176,26 @@
 
 ### Changed
 
+- Default dust is clipped per galaxy before averaging over the beta scatter,
+  so faint galaxies whose mean beta is near or below `beta_intr` get slightly
+  more attenuation than before (e.g. ~0.08 -> ~0.28 mag at M_UV = -16,
+  z = 6). Bright galaxies are unchanged.
+- `UVHMRModel.param_names()` lists `dust` instead of `add_dust`.
+- `examples/fit_uvlf.py`: the default `--nsteps` cap is 100000 steps per
+  walker (was 50000).
+
 - Requires Python >= 3.9 and `numpy < 2` (a `camb` limitation).
 - Only the `halogal` package is installed; the top-level `tests` and `examples`
   directories are no longer shipped as packages.
 - `tests/test_core.py`, which targeted a module that no longer exists, is
   replaced by `tests/test_model.py`.
+
+### Deprecated
+
+- `add_dust=` (models, `MUV_from_SFR`) and `remove_dust=` (`SFR_from_MUV`)
+  are still accepted with a `DeprecationWarning`: `True` maps to the default
+  dust model and `False` to no dust. The `add_dust` model attribute is now a
+  view of `dust`; setting it warns.
 
 ## 0.1.0
 

@@ -96,7 +96,7 @@ DEFAULT_HOD_PARAMS = {
     'Msat': 12.65,       # log10(Msat/Msun) - satellite normalization
     'M_min': 9.0,
     'asat': 0.85,        # Satellite power-law slope (alpha_sat in paper)
-    'add_dust': True,
+    'add_dust': True,    # legacy; unused (see halogal.dust / dust=)
     'ffb_delta': 0.15,   # Scatter about halo mass limit for FFB switch-on
     'eps_max_ffb': 1.0,  # Star formation efficiency in the FFB phase
 }
@@ -129,11 +129,28 @@ DBETA_DMUV = [-0.20, -0.11, -0.14, -0.20, -0.20, -0.15]
 BETA_MUV0 = -19.5
 BETA_C = -2.33
 
-# Dust attenuation parameters
+# Dust attenuation parameters: Meurer et al. (1999) A_1600 = C0 + C1 * beta
 DUST_C0 = 4.43
-DUST_C1 = 1.99
+DUST_C1 = 1.99                        # dA_UV / dbeta
+DUST_BETA_INTR = -DUST_C0 / DUST_C1   # intrinsic (dust-free) beta, ~ -2.226
 DUST_SIGMA_BETA = 0.34
-DUST_Z_MAX = 8.0
+DUST_Z_MAX = 8.0                      # legacy dust_attenuation(high_z_dust=False)
+# How the beta scatter enters the attenuation: "luminosity", "mean" or "none"
+# (see halogal.dust.BetaDust).
+DUST_SCATTER_AVERAGE = "luminosity"
+
+# EPOCHS Paper-1 beta-M_UV fits: each parameter is A0 + A1 * (z - z_pivot),
+# fitted over z_range to beta(M_UV = M0), dbeta/dM_UV and sigma_beta in bins
+# of 6.5 < z < 13.5 (EPOCHS-v2/Paper-1/fig6_linear_z.py). Use with
+# halogal.dust.LinearBetaMUV.epochs_paper1().
+EPOCHS_PAPER1_BETA_MUV = {
+    'beta_M0': (-2.2979, -0.03017),
+    'dbeta_dMUV': (-0.06116, 0.02370),
+    'sigma_beta': (0.3590, 0.02009),
+    'z_pivot': 7.0,
+    'M0': -19.0,
+    'z_range': (6.5, 13.5),
+}
 
 # SFR-to-UV conversion factor
 C_UV_SALPETER = 1.15e-28  # (M_sun yr^-1) / (erg s^-1 Hz^-1)

@@ -42,16 +42,22 @@ class GaussianLikelihood:
         integral is smooth, so a coarser grid (e.g. 256) is ~2.5x faster with
         <0.1% change in Phi. Bins that include clustering ignore this and reuse
         the ``halomod`` HMF (~110 points) instead. Default None keeps 2048.
+    model_kwargs : dict, optional
+        Fixed (not sampled) settings passed to every bin's ``HODModel``, e.g.
+        ``{"dust": BetaDust(LinearBetaMUV.epochs_paper1())}`` to fit with a
+        different dust prescription (see :mod:`halogal.dust`). Default: the
+        model defaults (including :data:`~halogal.dust.DEFAULT_DUST`).
     """
 
     def __init__(self, datasets, parametrization, catch_errors=True,
-                 hmf_points=None):
+                 hmf_points=None, model_kwargs=None):
         self.datasets = list(datasets)
         if not self.datasets:
             raise ValueError("GaussianLikelihood requires at least one Dataset")
         self.parametrization = parametrization
         self.catch_errors = catch_errors
         self.hmf_points = hmf_points
+        self.model_kwargs = dict(model_kwargs or {})
         self._validate()
         # Lazily constructed per process; see _ensure_setup / __getstate__.
         self._bins = None
@@ -101,7 +107,7 @@ class GaussianLikelihood:
         bins = OrderedDict()
         for d in self.datasets:
             if d.z not in bins:
-                obs = Observables(HODModel(z=d.z))
+                obs = Observables(HODModel(z=d.z, **self.model_kwargs))
                 bins[d.z] = {"obs": obs, "datasets": [], "clustering": None}
             bins[d.z]["datasets"].append(d)
             if d.kind == "clustering":

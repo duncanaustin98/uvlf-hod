@@ -53,6 +53,23 @@ from .luminosity import (
     SFR_from_MUV,
 )
 
+# Dust
+from .dust import (
+    DustModel,
+    NoDust,
+    BetaDust,
+    DEFAULT_DUST,
+    BetaMUVRelation,
+    LinearBetaMUV,
+    Bouwens14BetaMUV,
+    FunctionBetaMUV,
+    ConstantZ,
+    LinearZ,
+    PowerLawZ,
+    TabulatedZ,
+    as_z_function,
+)
+
 # Configuration
 from .config import (
     CosmologyConfig,
@@ -138,6 +155,21 @@ __all__ = [
     'dust_attenuation',
     'MUV_from_SFR',
     'SFR_from_MUV',
+
+    # Dust
+    'DustModel',
+    'NoDust',
+    'BetaDust',
+    'DEFAULT_DUST',
+    'BetaMUVRelation',
+    'LinearBetaMUV',
+    'Bouwens14BetaMUV',
+    'FunctionBetaMUV',
+    'ConstantZ',
+    'LinearZ',
+    'PowerLawZ',
+    'TabulatedZ',
+    'as_z_function',
     
     # Config
     'CosmologyConfig',
